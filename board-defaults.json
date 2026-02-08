@@ -2,6 +2,37 @@
 	"$schema": "board-defaults.schema.json",
 	"toolchain": "platformio",
 	"defaults": {
+		"BOARD_NARELRUSERCUSTOM": {
+			"values": {
+				"SENSORS": [
+					{
+						"protocol": "I2C",
+						"imu": "IMU_LSM6DSR",
+						"rotation": "DEG_0",
+						"scl": "5",
+						"sda": "4",
+						"int": "10"
+					}
+				],
+				"BATTERY": {
+					"type": "BAT_EXTERNAL",
+					"r1": 100,
+					"r2": 330,
+					"shieldR": 0,
+					"pin": "17"
+				},
+				"LED": {
+					"LED_PIN": "2",
+					"LED_INVERTED": true
+				}
+			},
+			"flashingRules": {
+				"applicationOffset": 0,
+				"needBootPress": false,
+				"needManualReboot": false,
+				"shouldOnlyUseDefaults": false
+			}
+		},
 		"BOARD_SLIMEVR": {
 			"values": {
 				"SENSORS": [
