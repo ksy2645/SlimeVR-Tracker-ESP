@@ -1,10 +1,20 @@
-.pio
+# IDE and build system files
 .vscode/*
-build/
-venv/
-cache/
 .idea/
-compile_commands.json
-node_modules/
+build/
 dist/
+compile_commands.json
+*.code-workspace
+
+# PlatformIO files
+.pio
 .nix-platformio
+
+# Python virtual environments
+venv/
+
+# cache files
+cache/
+
+# dependency directories
+node_modules/
