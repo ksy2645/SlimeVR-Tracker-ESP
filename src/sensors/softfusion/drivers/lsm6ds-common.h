@@ -59,7 +59,8 @@ struct LSM6DSOutputHandler {
 		DriverCallbacks<int16_t>&& callbacks,
 		float GyrTs,
 		float AccTs,
-		float TempTs
+		float TempTs,
+		float MagTs
 	) {
 		constexpr auto FIFO_SAMPLES_MASK = 0x3ff;
 		constexpr auto FIFO_OVERRUN_LATCHED_MASK = 0x800;
@@ -69,27 +70,22 @@ struct LSM6DSOutputHandler {
 		const auto fifo_bytes = available_axes * FullFifoEntrySize;
 		if (fifo_status & FIFO_OVERRUN_LATCHED_MASK) {
 			// FIFO overrun is expected to happen during startup and calibration
-			m_Logger.error(
-				"FIFO OVERRUN! This occuring during normal usage is an issue."
-			);
+			m_Logger.error("FIFO OVERRUN! This occuring during normal usage is an issue.");
 		}
 
-		std::array<uint8_t, FullFifoEntrySize * 8> read_buffer;  // max 8 readings
-		const auto bytes_to_read = std::min(
-									   static_cast<size_t>(read_buffer.size()),
-									   static_cast<size_t>(fifo_bytes)
-								   )
+		static constexpr size_t MaxFifoFramesPerRead
+			= (RegisterInterface::MaxTransactionLength / FullFifoEntrySize) > 0
+			? (RegisterInterface::MaxTransactionLength / FullFifoEntrySize) : 1;
+
+		std::array<uint8_t, FullFifoEntrySize * MaxFifoFramesPerRead> read_buffer;
+		const auto bytes_to_read = std::min(static_cast<size_t>(read_buffer.size()), static_cast<size_t>(fifo_bytes))
 								 / FullFifoEntrySize * FullFifoEntrySize;
-		m_RegisterInterface
-			.readBytes(Regs::FifoData, bytes_to_read, read_buffer.data());
+		m_RegisterInterface.readBytes(Regs::FifoData, bytes_to_read, read_buffer.data());
+
 		for (auto i = 0u; i < bytes_to_read; i += FullFifoEntrySize) {
 			FifoEntryAligned entry;
 			uint8_t tag = read_buffer[i] >> 3;
-			memcpy(
-				entry.raw,
-				&read_buffer[i + 0x1],
-				sizeof(FifoEntryAligned)
-			);  // skip fifo header
+			memcpy(entry.raw, &read_buffer[i + 0x1], sizeof(FifoEntryAligned));  // skip fifo header
 
 			switch (tag) {
 				case 0x01:  // Gyro NC
@@ -100,6 +96,15 @@ struct LSM6DSOutputHandler {
 					break;
 				case 0x03:  // Temperature
 					callbacks.processTempSample(entry.xyz[0], TempTs);
+					break;
+				case 0x0f:  // Slave. magnetometer sensor will be used in the slave.
+					if (callbacks.processMagSample) {
+						int16_t mag[3]{0, 0, 0};
+						if (callbacks.decodeRawMagSample) {
+							callbacks.decodeRawMagSample(entry.raw, mag);
+						}
+						callbacks.processMagSample(mag, MagTs);
+					}
 					break;
 			}
 		}
