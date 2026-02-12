@@ -231,6 +231,8 @@ public:
 	}
 
 	float getGyroTimestep() final { return calibration.G_Ts; }
+	
+	float getMagTimestep() final { return calibration.M_Ts; }
 
 	float getTempTimestep() final { return calibration.T_Ts; }
 
