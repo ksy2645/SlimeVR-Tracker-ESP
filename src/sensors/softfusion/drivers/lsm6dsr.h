@@ -50,7 +50,7 @@ struct LSM6DSR : LSM6DSOutputHandler {
 
 	static constexpr float GyrFreq = 208;
 	static constexpr float AccFreq = 104;
-	static constexpr float MagFreq = 120;
+	static constexpr float MagFreq = 26; // m_aux_hub_odr == k26Hz
 	static constexpr float TempFreq = 52;
 
 	static constexpr float GyrTs = 1.0 / GyrFreq;
