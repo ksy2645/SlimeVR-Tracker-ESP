@@ -82,6 +82,8 @@ public:
 
 	virtual void scaleGyroSample(sensor_real_t gyroSample[3]) = 0;
 	virtual float getGyroTimestep() = 0;
+	
+	virtual float getMagTimestep() = 0;
 
 	virtual void scaleMagSample(sensor_real_t magSample[3]) = 0;
 
@@ -102,7 +104,7 @@ protected:
 			IMU::SensorVQFParams,
 			getGyroTimestep(),
 			getAccelTimestep(),
-			getTempTimestep()
+			getMagTimestep()
 		);
 	}
 
