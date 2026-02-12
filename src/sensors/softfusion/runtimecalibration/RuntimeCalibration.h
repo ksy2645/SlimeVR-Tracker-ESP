@@ -178,6 +178,30 @@ public:
 		);
 	}
 
+	void scaleMagSample(sensor_real_t magSample[3]) final {
+		float tmp[3];
+		for (uint8_t i = 0; i < 3; i++) {
+			tmp[i] = (magSample[i] - calibration.M_B[i]);
+		}
+
+		// magSample[0]
+		// 		= (calibration.M_Ainv[0][0] * tmp[0]
+		// 		+ calibration.M_Ainv[0][1] * tmp[1]
+		// 		+ calibration.M_Ainv[0][2] * tmp[2]);
+		// magSample[1]
+		// 		= (calibration.M_Ainv[1][0] * tmp[0]
+		// 		+ calibration.M_Ainv[1][1] * tmp[1]
+		// 		+ calibration.M_Ainv[1][2] * tmp[2]);
+		// magSample[2]
+		// 		= (calibration.M_Ainv[2][0] * tmp[0]
+		// 		+ calibration.M_Ainv[2][1] * tmp[1]
+		// 		+ calibration.M_Ainv[2][2] * tmp[2]);
+
+		for (uint8_t i = 0; i < 3; i++) {
+			magSample[i] = tmp[i];
+		}
+	}
+
 	float getGyroTimestep() final { return activeCalibration.G_Ts; }
 
 	float getTempTimestep() final { return activeCalibration.T_Ts; }
@@ -442,6 +466,9 @@ private:
 
 		.accelCalibrated = {false, false, false},
 		.A_off = {0.0, 0.0, 0.0},
+		
+		.M_B = {0.0, 0.0, 0.0},
+		.M_Ainv = {{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}}
 	};
 
 	float activeZROChange = 0;
