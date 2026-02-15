@@ -223,7 +223,6 @@ public:
 
 		// read fifo updating fusion
 		uint32_t now = micros();
-
 		if constexpr (Consts::DirectTempReadOnly) {
 			uint32_t tempElapsed = now - lastTempPollTime;
 			if (tempElapsed >= Consts::DirectTempReadTs * 1e6) {
@@ -247,25 +246,20 @@ public:
 		if (toggles.getToggle(SensorToggles::TempGradientCalibrationEnabled)) {
 			tempGradientCalculator.tick();
 		}
-
+		
 		constexpr uint32_t targetPollIntervalMicros = 6000;
+		now = micros();
 		uint32_t elapsed = now - m_lastPollTime;
+		bool isGyroSamplePooled = false;
 		if (elapsed >= targetPollIntervalMicros) {
 			m_lastPollTime = now - (elapsed - targetPollIntervalMicros);
-		}
-
-		// send new fusion values when time is up
-		now = micros();
-		constexpr float maxSendRateHz = 100.0f;
-		constexpr uint32_t sendInterval = 1.0f / maxSendRateHz * 1e6f;
-		elapsed = now - m_lastRotationPacketSent;
-		if (elapsed >= sendInterval) {
 			auto overwhelmed = m_sensor.bulkRead({
 				[&](const auto sample[3], float AccTs) {
 					processAccelSample(sample, AccTs);
 				},
 				[&](const auto sample[3], float GyrTs) {
 					processGyroSample(sample, GyrTs);
+					isGyroSamplePooled = true;
 				},
 				[&](int16_t sample, float TempTs) {
 					processTempSample(sample, TempTs);
@@ -277,27 +271,38 @@ public:
 					return magAttached && magDriver.decodeRawSample(rawSample, decodedSample);
 				},
 			});
+
 			if (overwhelmed) {
 				calibrator.signalOverwhelmed();
 			}
-			if (!m_fusion.isUpdated()) {
-				checkSensorTimeout();
-				return;
-			}
-			hadData = true;
-			m_lastRotationUpdateMillis = millis();
-			m_fusion.clearUpdated();
 
+			if (!isGyroSamplePooled) {
+				checkSensorTimeout();
+			}
+			else {
+				hadData = true;
+				m_lastRotationUpdateMillis = millis();
+			}
+		}
+
+		// send new fusion values when time is up
+		now = micros();
+		elapsed = now - m_lastRotationPacketSent;
+		constexpr float maxSendRateHz = 100.0f;
+		constexpr uint32_t sendInterval = 1.0f / maxSendRateHz * 1e6f;
+		if (elapsed >= sendInterval) {
 			m_lastRotationPacketSent = now - (elapsed - sendInterval);
 
 			setFusedRotation(m_fusion.getQuaternionQuat());
 			setAcceleration(m_fusion.getLinearAccVec());
+			m_fusion.clearUpdated();
 			optimistic_yield(100);
 		}
-
-		if (calibrationDetector.update(m_fusion)) {
+		
+		if (isGyroSamplePooled && calibrationDetector.update(m_fusion)) {
 			markRestCalibrationComplete();
 		}
+
 	}
 
 	void motionSetup() final {
