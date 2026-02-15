@@ -290,7 +290,7 @@ public:
 		elapsed = now - m_lastRotationPacketSent;
 		constexpr float maxSendRateHz = 100.0f;
 		constexpr uint32_t sendInterval = 1.0f / maxSendRateHz * 1e6f;
-		if (elapsed >= sendInterval) {
+		if (m_fusion.isUpdated() && elapsed >= sendInterval) {
 			m_lastRotationPacketSent = now - (elapsed - sendInterval);
 
 			setFusedRotation(m_fusion.getQuaternionQuat());
