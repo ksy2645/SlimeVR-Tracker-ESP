@@ -206,6 +206,14 @@ struct LSM6DSR : LSM6DSOutputHandler {
 			m_Logger.error("LSM6DSR: Failed writing aux register 0x%02X after %u attempts", regAddr, static_cast<unsigned>(maxRetries));
 		}
 
+		resetAuxPollingSetting();
+		if (m_aux_read_len != 0) {
+			setAuxPollingSetting();
+			if (!waitAuxOperationDone(auxOpTimeoutMs)) {
+				m_Logger.error("LSM6DSR: Timeout restoring aux polling after write register 0x%02X", regAddr);
+			}
+		}
+
 		exitEmbeddedAccess();
 	}
 

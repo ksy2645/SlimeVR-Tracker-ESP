@@ -82,7 +82,8 @@ std::vector<MagDefinition> MagDriver::supportedMags{
 				interface.writeByte(0x1C, 0x80);	// Ctrl1Reg: Internal Control 1: SW reset
 				delay(20);							// MMC5603NJ needs 20ms delay after soft reset
 				interface.writeByte(0x1C, 0x00);	// Ctrl1Reg: Internal Control 1: Normal mode
-				interface.writeByte(0x1A, 26);		// ODR
+				delay(5);
+				interface.writeByte(0x1A, 26);		// ODR: 26Hz
 				interface.writeByte(0x1B, 0xA0);	// Ctrl0Reg: BW=00, AutoSR=1, CM freq enable
 				interface.writeByte(0x1D, 0x10);	// Ctrl2Reg: Continuous mode enable
 				return true;
@@ -168,7 +169,8 @@ bool MagDriver::init(MagInterface&& interface, bool supports9ByteMags) {
 		}
 
 		logger.info("Found mag %s! Initializing", mag.name);
-
+		
+		delay(50);
 		if (!mag.setup(interface)) {
 			logger.error("Mag %s failed to initialize!", mag.name);
 			return false;

@@ -161,7 +161,7 @@ class SoftFusionSensor : public Sensor {
 
 		calibrator.scaleMagSample(magData);
 		m_fusion.updateMag(magData, timeDelta);
-		calibrator.provideMagSample(xyz);
+		//calibrator.provideMagSample(xyz);
 
 		lastMagData[0] = magData[0];
 		lastMagData[1] = magData[1];
