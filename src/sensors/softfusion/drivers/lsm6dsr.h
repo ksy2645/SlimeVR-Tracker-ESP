@@ -163,8 +163,12 @@ struct LSM6DSR : LSM6DSOutputHandler {
 		enterEmbeddedAccess();
 
 		m_RegisterInterface.writeReg(RMasterConfig, VMasterReset);
-		delay(100);
+		delay(20);
 		m_RegisterInterface.writeReg(RMasterConfig, VMasterEnable);
+		delay(5);
+		m_RegisterInterface.writeReg(RMasterConfig, VMasterDisable);
+		delay(1);
+
 		m_RegisterInterface.writeReg(RSlv0Add, (deviceId << 1)); // bit0 is R/W bit, write
 		m_RegisterInterface.writeReg(RSlv0Config, m_aux_hub_odr);
 		m_RegisterInterface.writeReg(RSlv1Add, (deviceId << 1) | 0x01); // read
@@ -179,11 +183,12 @@ struct LSM6DSR : LSM6DSOutputHandler {
 		enterEmbeddedAccess();
 
 		constexpr uint8_t maxRetries = 5;
-		constexpr uint32_t auxOpTimeoutMs = 50;
+		constexpr uint32_t auxOpTimeoutMs = 120;
 		constexpr uint32_t retryDelayMs = 40;
 		bool writeSuccess = false;
 
 		for (uint8_t attempt = 0; attempt < maxRetries; ++attempt) {
+			m_RegisterInterface.writeReg(RMasterConfig, VMasterDisable);
 			m_RegisterInterface.writeReg(RSlv0Subadd, regAddr);
 			m_RegisterInterface.writeReg(RDatawriteSlv0, value);
 			m_RegisterInterface.writeReg(RMasterConfig, VMasterEnable);
@@ -209,7 +214,7 @@ struct LSM6DSR : LSM6DSOutputHandler {
 		
 		uint8_t out_value = 0;
 		constexpr uint8_t maxRetries = 5;
-		constexpr uint32_t auxOpTimeoutMs = 50;
+		constexpr uint32_t auxOpTimeoutMs = 120;
 		constexpr uint32_t retryDelayMs = 40;
 		bool readSuccess = false;
 
@@ -250,13 +255,14 @@ struct LSM6DSR : LSM6DSOutputHandler {
 
 	void startAuxPolling(uint8_t dataReg, MagDataWidth dataWidth) {
 		enterEmbeddedAccess();
+		constexpr uint32_t auxStartTimeoutMs = 120;
 
 		m_aux_data_reg = dataReg;
 		m_aux_read_len = (dataWidth == MagDataWidth::SixByte) ? 6 : 9;
 
 		resetAuxPollingSetting();
 		setAuxPollingSetting();
-		if (!waitAuxOperationDone(50)) {
+		if (!waitAuxOperationDone(auxStartTimeoutMs)) {
 			m_Logger.error("LSM6DSR: Timeout starting aux polling");
 		}
 
