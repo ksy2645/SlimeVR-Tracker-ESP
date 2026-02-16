@@ -235,9 +235,13 @@ struct LSM6DSR : LSM6DSOutputHandler {
 			m_Logger.error("LSM6DSR: Failed reading aux register 0x%02X after %u attempts", address, static_cast<unsigned>(maxRetries));
 		}
 
-		// restore aux polling settings
+		resetAuxPollingSetting();
+
 		if (m_aux_read_len != 0) {
 			setAuxPollingSetting();
+			if (!waitAuxOperationDone(auxOpTimeoutMs)) {
+				m_Logger.error("LSM6DSR: Timeout restoring aux polling after read register 0x%02X", address);
+			}
 		}
 
 		exitEmbeddedAccess();
