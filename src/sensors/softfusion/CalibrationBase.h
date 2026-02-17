@@ -82,7 +82,6 @@ public:
 
 	virtual void scaleGyroSample(sensor_real_t gyroSample[3]) = 0;
 	virtual float getGyroTimestep() = 0;
-	
 	virtual float getMagTimestep() = 0;
 
 	virtual float getTempTimestep() = 0;
