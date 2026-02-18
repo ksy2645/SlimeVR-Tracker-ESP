@@ -94,7 +94,10 @@ public:
 	virtual void signalOverwhelmed() {}
 	virtual void provideAccelSample(const RawSensorT accelSample[3]) {}
 	virtual void provideGyroSample(const RawSensorT gyroSample[3]) {}
+	virtual void provideMagSample(const RawSensorT magSample[3]) {}
 	virtual void provideTempSample(float tempSample) {}
+	virtual void onMagEnabled() {}
+	virtual bool clearMagCalibration() { return false; }
 
 	virtual float getZROChange() { return IMU::TemperatureZROChange; };
 

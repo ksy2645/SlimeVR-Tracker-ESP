@@ -102,6 +102,7 @@ struct RuntimeCalibrationSensorConfig {
 	// magnetometer offsets and correction matrix
 	float M_B[3];
 	float M_Ainv[3][3];
+	float M_refNorm;
 };
 
 struct MPU6050SensorConfig {

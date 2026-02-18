@@ -106,6 +106,22 @@ class SoftFusionSensor : public Sensor {
 		);
 	}};
 
+	bool shouldUpdateMagFusion() {
+		if constexpr (requires(Calib& c) { c.shouldUpdateMagFusion(); }) {
+			return calibrator.shouldUpdateMagFusion();
+		}
+		return true;
+	}
+
+	bool shouldUseMagSample(const sensor_real_t magSample[3]) {
+		if constexpr (requires(Calib& c, const sensor_real_t* sample) {
+						  c.shouldUseMagSample(sample);
+					  }) {
+			return calibrator.shouldUseMagSample(magSample);
+		}
+		return true;
+	}
+
 	void processAccelSample(const RawSensorT xyz[3], const sensor_real_t timeDelta) {
 		sensor_real_t accelData[]
 			= {static_cast<sensor_real_t>(xyz[0]),
@@ -160,8 +176,11 @@ class SoftFusionSensor : public Sensor {
 			   static_cast<sensor_real_t>(xyz[2])};
 
 		calibrator.scaleMagSample(magData);
-		m_fusion.updateMag(magData, timeDelta);
-		//calibrator.provideMagSample(xyz);
+		const bool shouldUpdateMag = shouldUpdateMagFusion();
+		if (shouldUpdateMag && shouldUseMagSample(magData)) {
+			m_fusion.updateMag(magData, timeDelta);
+		}
+		calibrator.provideMagSample(xyz);
 
 		lastMagData[0] = magData[0];
 		lastMagData[1] = magData[1];
@@ -249,8 +268,8 @@ public:
 		if (toggles.getToggle(SensorToggles::TempGradientCalibrationEnabled)) {
 			tempGradientCalculator.tick();
 		}
-		
-		constexpr uint32_t targetPollIntervalMicros = 6000;
+
+		constexpr uint32_t targetPollIntervalMicros = 4000;  // 4 ms = 250 Hz
 		now = micros();
 		uint32_t elapsed = now - m_lastPollTime;
 		bool isSamplePooled = false;
@@ -294,17 +313,18 @@ public:
 		// send new fusion values when time is up
 		now = micros();
 		elapsed = now - m_lastRotationPacketSent;
-		constexpr float maxSendRateHz = 100.0f;
-		constexpr uint32_t sendInterval = 1.0f / maxSendRateHz * 1e6f;
-		if (m_fusion.isUpdated() && elapsed >= sendInterval) {
-			m_lastRotationPacketSent = now - (elapsed - sendInterval);
+		// constexpr float maxSendRateHz = 100.0f;
+		// constexpr uint32_t sendInterval = 1.0f / maxSendRateHz * 1e6f;
+		constexpr uint32_t sendIntervalMicros = 10000;  // 10 ms = 100 Hz
+		if (m_fusion.isUpdated() && elapsed >= sendIntervalMicros) {
+			m_lastRotationPacketSent = now - (elapsed - sendIntervalMicros);
 
 			setFusedRotation(m_fusion.getQuaternionQuat());
 			setAcceleration(m_fusion.getLinearAccVec());
 			m_fusion.clearUpdated();
 			optimistic_yield(100);
 		}
-		
+
 		if (isGyroSamplePooled && calibrationDetector.update(m_fusion)) {
 			markRestCalibrationComplete();
 		}
@@ -394,6 +414,7 @@ public:
 
 			if (magAttached && toggles.getToggle(SensorToggles::MagEnabled)) {
 				magDriver.startPolling();
+				calibrator.onMagEnabled();
 			}
 		}
 
@@ -402,6 +423,9 @@ public:
 				m_lastMagToggleMillis = millis();
 				m_pendingMagEnabled = value;
 				m_hasPendingMagToggle = true;
+				if (value) {
+					calibrator.onMagEnabled();
+				}
 			}
 		});
 	}
@@ -409,6 +433,8 @@ public:
 	void startCalibration(int calibrationType) final {
 		calibrator.startCalibration(calibrationType);
 	}
+
+	bool clearMagCalibration() final { return calibrator.clearMagCalibration(); }
 
 	[[nodiscard]] bool isFlagSupported(SensorToggles toggle) const final {
 		return toggle == SensorToggles::CalibrationEnabled
