@@ -7,8 +7,8 @@ void SensorFusion::update6D(
 	sensor_real_t Gxyz[3],
 	sensor_real_t deltat
 ) {
-	updateAcc(Axyz, deltat);
 	updateGyro(Gxyz, deltat);
+	updateAcc(Axyz, deltat);
 }
 
 void SensorFusion::update9D(
@@ -17,9 +17,9 @@ void SensorFusion::update9D(
 	sensor_real_t Mxyz[3],
 	sensor_real_t deltat
 ) {
-	updateMag(Mxyz, deltat);
-	updateAcc(Axyz, deltat);
 	updateGyro(Gxyz, deltat);
+	updateAcc(Axyz, deltat);
+	updateMag(Mxyz, deltat);
 }
 
 void SensorFusion::updateAcc(const sensor_real_t Axyz[3], sensor_real_t deltat) {
