@@ -899,7 +899,7 @@ void VQF::setup()
 }
 
 void VQF::updateBiasForgettingTime(float biasForgettingTime) {
-    coeffs.biasV = square(0.1*100.0)*coeffs.accTs/params.biasForgettingTime;
+    coeffs.biasV = square(0.1*100.0)*coeffs.accTs/biasForgettingTime;
 
 #ifndef VQF_NO_MOTION_BIAS_ESTIMATION
     vqf_real_t pMotion = square(params.biasSigmaMotion*100.0);
