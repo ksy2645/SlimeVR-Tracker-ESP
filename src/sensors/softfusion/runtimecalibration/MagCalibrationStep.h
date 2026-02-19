@@ -51,7 +51,7 @@ public:
 		CalibrationStep<SensorRawT>::start();
 		calibrationData = CalibrationData{};
 		calibrationData.value().startMillis = millis();
-		ledManager.on();
+		statusManager.setStatus(SlimeVR::Status::MAG_CALIBRATING, true);
 
 		logger.info(
 			"Mag calibration started: rotate the tracker through as many orientations as possible"
@@ -71,8 +71,8 @@ public:
 				static_cast<unsigned>(calibrationData.value().storedSampleCount),
 				static_cast<unsigned>(minCalibrationSampleCount)
 			);
+			statusManager.setStatus(SlimeVR::Status::MAG_CALIBRATING, false);
 			ledManager.pattern(60, 60, 3);
-			ledManager.off();
 			return TickResult::SKIP;
 		}
 
@@ -86,8 +86,8 @@ public:
 		if (!isCalibrationMatrixSane(M_BAinv)) {
 			if (elapsedMillis > maxCalibrationTimeSeconds * 1e3) {
 				logger.warn("Mag calibration matrix sanity check failed");
+				statusManager.setStatus(SlimeVR::Status::MAG_CALIBRATING, false);
 				ledManager.pattern(60, 60, 3);
-				ledManager.off();
 				return TickResult::SKIP;
 			}
 			return TickResult::CONTINUE;
@@ -100,8 +100,8 @@ public:
 					"Mag calibration quality check failed after timeout (%u samples)",
 					static_cast<unsigned>(calibrationData.value().storedSampleCount)
 				);
+				statusManager.setStatus(SlimeVR::Status::MAG_CALIBRATING, false);
 				ledManager.pattern(60, 60, 3);
-				ledManager.off();
 				return TickResult::SKIP;
 			}
 			return TickResult::CONTINUE;
@@ -119,15 +119,15 @@ public:
 			"Mag calibration completed with %u filtered samples",
 			static_cast<unsigned>(calibrationData.value().storedSampleCount)
 		);
+		statusManager.setStatus(SlimeVR::Status::MAG_CALIBRATING, false);
 		ledManager.pattern(100, 100, 2);
-		ledManager.off();
 
 		return TickResult::DONE;
 	}
 
 	void cancel() override final {
 		calibrationData.reset();
-		ledManager.off();
+		statusManager.setStatus(SlimeVR::Status::MAG_CALIBRATING, false);
 	}
 	bool requiresRest() override final { return false; }
 
@@ -153,9 +153,20 @@ private:
 	static constexpr size_t minCalibrationSampleCount = 240;
 	static constexpr uint8_t maxCalibrationTimeSeconds = 90;
 	static constexpr int16_t minSampleDelta = 40;
+	static constexpr int16_t maxRawAbsValue = 1500;
+	static constexpr int16_t maxSpikeDelta = 2200;
 	static constexpr float maxMagnitudeDeviation = 20.0f;
 
 	bool shouldAcceptSample(const SensorRawT magSample[3]) {
+		if (magSample[0] == 0 && magSample[1] == 0 && magSample[2] == 0) {
+			return false;
+		}
+		if (std::abs(static_cast<int32_t>(magSample[0])) > maxRawAbsValue
+			|| std::abs(static_cast<int32_t>(magSample[1])) > maxRawAbsValue
+			|| std::abs(static_cast<int32_t>(magSample[2])) > maxRawAbsValue) {
+			return false;
+		}
+
 		auto& data = calibrationData.value();
 		if (!data.lastAcceptedSample.has_value()) {
 			data.lastAcceptedSample = {magSample[0], magSample[1], magSample[2]};
@@ -163,14 +174,23 @@ private:
 		}
 
 		const auto& prev = data.lastAcceptedSample.value();
+		const int32_t dx = std::abs(
+			static_cast<int32_t>(magSample[0]) - static_cast<int32_t>(prev[0])
+		);
+		const int32_t dy = std::abs(
+			static_cast<int32_t>(magSample[1]) - static_cast<int32_t>(prev[1])
+		);
+		const int32_t dz = std::abs(
+			static_cast<int32_t>(magSample[2]) - static_cast<int32_t>(prev[2])
+		);
+
 		const bool changedEnough
-			= std::abs(static_cast<int32_t>(magSample[0]) - static_cast<int32_t>(prev[0]))
-				  > minSampleDelta
-			|| std::abs(static_cast<int32_t>(magSample[1]) - static_cast<int32_t>(prev[1]))
-				  > minSampleDelta
-			|| std::abs(static_cast<int32_t>(magSample[2]) - static_cast<int32_t>(prev[2]))
-				  > minSampleDelta;
+			= dx > minSampleDelta || dy > minSampleDelta || dz > minSampleDelta;
 		if (!changedEnough) {
+			return false;
+		}
+
+		if (dx > maxSpikeDelta || dy > maxSpikeDelta || dz > maxSpikeDelta) {
 			return false;
 		}
 
