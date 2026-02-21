@@ -354,7 +354,7 @@ private:
 
 	static constexpr float minValidMagReferenceNorm = 1.0f;
 	static constexpr float maxValidMagReferenceNorm = 100000.0f;
-	static constexpr float magNormRejectRelativeThreshold = 0.07f;
+	static constexpr float magNormRejectRelativeThreshold = 0.35f;
 	static constexpr float magNormRejectAbsoluteThreshold = 20.0f;
 
 	void computeNextCalibrationStep() {

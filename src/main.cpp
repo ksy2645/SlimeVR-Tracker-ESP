@@ -57,65 +57,6 @@ unsigned long lastStatePrint = 0;
 bool secondImuActive = false;
 BatteryMonitor battery;
 TPSCounter tpsCounter;
-volatile uint8_t cpuUsagePercent = 0;
-volatile uint32_t cpuBusyMicros = 0;
-volatile uint32_t cpuLoopMicros = 0;
-volatile uint32_t cpu1sBusyMicros = 0;
-volatile uint32_t cpu1sTotalMicros = 0;
-volatile uint32_t cpu1sMaxBusyMicros = 0;
-volatile uint32_t cpu1sMaxTotalMicros = 0;
-volatile uint32_t cpu1sLoopCount = 0;
-
-static void updateCpuUsageStats(uint32_t busyMicros, uint32_t loopMicros) {
-	static uint32_t busyAccum = 0;
-	static uint32_t loopAccum = 0;
-	static uint32_t maxBusyMicros = 0;
-	static uint32_t maxLoopMicros = 0;
-	static uint32_t loopCount = 0;
-	static unsigned long windowStart = 0;
-
-	if (windowStart == 0) {
-		windowStart = millis();
-	}
-
-	cpuBusyMicros = busyMicros;
-	cpuLoopMicros = loopMicros;
-
-	busyAccum += busyMicros;
-	loopAccum += loopMicros;
-	loopCount++;
-	if (busyMicros > maxBusyMicros) {
-		maxBusyMicros = busyMicros;
-	}
-	if (loopMicros > maxLoopMicros) {
-		maxLoopMicros = loopMicros;
-	}
-
-	unsigned long now = millis();
-	if (now - windowStart >= 1000) {
-		cpu1sBusyMicros = busyAccum;
-		cpu1sTotalMicros = loopAccum;
-		cpu1sMaxBusyMicros = maxBusyMicros;
-		cpu1sMaxTotalMicros = maxLoopMicros;
-		cpu1sLoopCount = loopCount;
-
-		if (loopAccum == 0) {
-			cpuUsagePercent = 0;
-		} else {
-			uint32_t usage = (busyAccum * 100U) / loopAccum;
-			if (usage > 100U) {
-				usage = 100U;
-			}
-			cpuUsagePercent = static_cast<uint8_t>(usage);
-		}
-		busyAccum = 0;
-		loopAccum = 0;
-		maxBusyMicros = 0;
-		maxLoopMicros = 0;
-		loopCount = 0;
-		windowStart = now;
-	}
-}
 
 void setup() {
 	Serial.begin(serialBaudRate);
@@ -212,19 +153,6 @@ void setup() {
 }
 
 void loop() {
-#ifndef TARGET_LOOPTIME_MICROS
-	static unsigned long prevLoopStart = 0;
-	uint32_t loopPeriodMicros = 0;
-#endif
-	const unsigned long loopStart = micros();
-
-#ifndef TARGET_LOOPTIME_MICROS
-	if (prevLoopStart != 0) {
-		loopPeriodMicros = static_cast<uint32_t>(loopStart - prevLoopStart);
-	}
-	prevLoopStart = loopStart;
-#endif
-
 	tpsCounter.update();
 	globalTimer.tick();
 	SerialCommands::update();
@@ -243,9 +171,6 @@ void loop() {
 	ledManager.update();
 	I2CSCAN::update();
 #ifdef TARGET_LOOPTIME_MICROS
-	const unsigned long busyEnd = micros();
-	const uint32_t busyMicros = static_cast<uint32_t>(busyEnd - loopStart);
-
 	long elapsed = (micros() - loopTime);
 	if (elapsed < TARGET_LOOPTIME_MICROS) {
 		long sleepus = TARGET_LOOPTIME_MICROS - elapsed - 100;  // µs to sleep
@@ -259,15 +184,7 @@ void loop() {
 			delayMicroseconds(sleepus);
 		}
 	}
-	const unsigned long loopEnd = micros();
-	const uint32_t totalMicros = static_cast<uint32_t>(loopEnd - loopStart);
-	updateCpuUsageStats(busyMicros, totalMicros);
-	loopTime = loopEnd;
-#else
-	const unsigned long loopEnd = micros();
-	const uint32_t busyMicros = static_cast<uint32_t>(loopEnd - loopStart);
-	const uint32_t totalMicros = loopPeriodMicros > busyMicros ? loopPeriodMicros : busyMicros;
-	updateCpuUsageStats(busyMicros, totalMicros);
+	loopTime = micros();
 #endif
 #if defined(PRINT_STATE_EVERY_MS) && PRINT_STATE_EVERY_MS > 0
 	unsigned long now = millis();
