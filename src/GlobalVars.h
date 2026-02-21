@@ -22,6 +22,8 @@
 */
 #pragma once
 
+#include <cstdint>
+
 #include <arduino-timer.h>
 
 #include "batterymonitor.h"
@@ -44,3 +46,11 @@ extern SlimeVR::Network::Connection networkConnection;
 extern BatteryMonitor battery;
 extern SlimeVR::WiFiNetwork wifiNetwork;
 extern SlimeVR::WifiProvisioning wifiProvisioning;
+extern volatile uint8_t cpuUsagePercent;
+extern volatile uint32_t cpuBusyMicros;
+extern volatile uint32_t cpuLoopMicros;
+extern volatile uint32_t cpu1sBusyMicros;
+extern volatile uint32_t cpu1sTotalMicros;
+extern volatile uint32_t cpu1sMaxBusyMicros;
+extern volatile uint32_t cpu1sMaxTotalMicros;
+extern volatile uint32_t cpu1sLoopCount;

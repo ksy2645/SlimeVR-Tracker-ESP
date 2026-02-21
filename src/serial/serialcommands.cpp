@@ -203,6 +203,52 @@ void printState() {
 	);
 }
 
+void printResourceState() {
+	logger.info(
+		"[RES] uptime(ms): %lu, cpu usage(1s est): %u%%, free heap: %u",
+		millis(),
+		cpuUsagePercent,
+		ESP.getFreeHeap()
+	);
+	if (cpu1sTotalMicros > 0) {
+		logger.info(
+			"[RES] 1s busy/total: %lu/%lu us, loops: %u",
+			static_cast<unsigned long>(cpu1sBusyMicros),
+			static_cast<unsigned long>(cpu1sTotalMicros),
+			static_cast<unsigned>(cpu1sLoopCount)
+		);
+		logger.info(
+			"[RES] loop(last): %lu/%lu us, 1s max loop: %lu/%lu us",
+			static_cast<unsigned long>(cpuBusyMicros),
+			static_cast<unsigned long>(cpuLoopMicros),
+			static_cast<unsigned long>(cpu1sMaxBusyMicros),
+			static_cast<unsigned long>(cpu1sMaxTotalMicros)
+		);
+	} else {
+		logger.info(
+			"[RES] cpu usage(1s est): warming up, loop(last): %lu/%lu us",
+			static_cast<unsigned long>(cpuBusyMicros),
+			static_cast<unsigned long>(cpuLoopMicros)
+		);
+	}
+
+	// #ifdef ESP8266
+	//	logger.info(
+	//		"[RES] heap frag: %u%%, max free block: %u",
+	//		ESP.getHeapFragmentation(),
+	//		ESP.getMaxFreeBlockSize()
+	//	);
+	// #elif defined(ESP32)
+	//	logger.info(
+	//		"[RES] min free heap: %u, max alloc heap: %u",
+	//		ESP.getMinFreeHeap(),
+	//		ESP.getMaxAllocHeap()
+	//	);
+	//	logger
+	//		.info("[RES] psram free/total: %u/%u", ESP.getFreePsram(),
+	//ESP.getPsramSize()); #endif
+}
+
 #ifdef ESP32
 String getEncryptionTypeName(wifi_auth_mode_t type) {
 	switch (type) {
@@ -252,9 +298,14 @@ void cmdGet(CmdParser* parser) {
 
 	if (parser->equalCmdParam(1, "INFO")) {
 		printState();
+		// printResourceState();
 
 		// We don't want to print this on every timed state output
 		logger.info("Git commit: %s", GIT_REV);
+	}
+
+	if (parser->equalCmdParam(1, "RES") || parser->equalCmdParam(1, "RESOURCE")) {
+		printResourceState();
 	}
 
 	if (parser->equalCmdParam(1, "CONFIG")) {
