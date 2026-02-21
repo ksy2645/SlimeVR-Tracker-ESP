@@ -229,7 +229,7 @@ void Configuration::eraseSensors() {
 
 void Configuration::loadSensors() {
 	SlimeVR::Utils::forEachFile(DIR_CALIBRATIONS, [&](SlimeVR::Utils::File f) {
-		SensorConfig sensorConfig;
+		SensorConfig sensorConfig{};
 		f.read((uint8_t*)&sensorConfig, sizeof(SensorConfig));
 
 		uint8_t sensorId = strtoul(f.name(), nullptr, 10);

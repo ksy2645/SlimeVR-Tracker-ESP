@@ -50,6 +50,22 @@
 			"enum": ["DEG_0", "DEG_90", "DEG_180", "DEG_270"],
 			"description": "Protocol"
 		},
+		"MAG_AXIS_REMAP_AXIS": {
+			"type": "string",
+			"enum": ["X", "Y", "Z", "XN", "YN", "ZN"],
+			"description": "Axis remap selector for magnetometer output"
+		},
+		"MAG_AXIS_REMAP": {
+			"type": "object",
+			"description": "Magnetometer axis remap descriptor",
+			"properties": {
+				"x": { "$ref": "#/$defs/MAG_AXIS_REMAP_AXIS" },
+				"y": { "$ref": "#/$defs/MAG_AXIS_REMAP_AXIS" },
+				"z": { "$ref": "#/$defs/MAG_AXIS_REMAP_AXIS" }
+			},
+			"required": ["x", "y", "z"],
+			"additionalProperties": false
+		},
 
 		"I2C_IMU": {
 			"type": "object",
@@ -177,6 +193,10 @@
 					"minItems": 1,
 					"maxItems": 2,
 					"description": "Sensors List"
+				},
+				"MAG_AXIS_REMAP": {
+					"$ref": "#/$defs/MAG_AXIS_REMAP",
+					"description": "Optional board-level mag axis remap"
 				},
 				"LED": {
 					"type": "object",

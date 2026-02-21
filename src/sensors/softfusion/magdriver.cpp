@@ -22,9 +22,41 @@
 */
 
 #include "magdriver.h"
+#include "../axisremap.h"
 
 namespace SlimeVR::Sensors::SoftFusion {
 namespace {
+	int16_t clampToInt16(const int32_t value) {
+		if (value > 32767) {
+			return 32767;
+		}
+		if (value < -32768) {
+			return -32768;
+		}
+		return static_cast<int16_t>(value);
+	}
+
+	#ifndef MAG_AXIS_REMAP
+	#define MAG_AXIS_REMAP \
+		(AXIS_REMAP_AXIS_X(AXIS_REMAP_USE_X) | AXIS_REMAP_AXIS_Y(AXIS_REMAP_USE_Y) \
+		 | AXIS_REMAP_AXIS_Z(AXIS_REMAP_USE_Z))
+	#endif
+
+	static constexpr int MagAxisRemap = MAG_AXIS_REMAP;
+
+	// Board-level override can provide MAG_AXIS_REMAP via build flags.
+	void applyMagAxisMapping(int16_t sample[3]) {
+		int32_t mx = sample[0];
+		int32_t my = sample[1];
+		int32_t mz = sample[2];
+
+		remapAllAxis<int32_t>(MagAxisRemap, &mx, &my, &mz);
+
+		sample[0] = clampToInt16(mx);
+		sample[1] = clampToInt16(my);
+		sample[2] = clampToInt16(mz);
+	}
+
 	bool decodeUnsignedBigEndianCentered32768(const uint8_t* rawSample, MagDataWidth width, int16_t* outDecodedSample) {
 		// guard or performance?
 		// if (width != MagDataWidth::SixByte) {
@@ -82,7 +114,8 @@ std::vector<MagDefinition> MagDriver::supportedMags{
 				interface.writeByte(0x1C, 0x80);	// Ctrl1Reg: Internal Control 1: SW reset
 				delay(20);							// MMC5603NJ needs 20ms delay after soft reset
 				interface.writeByte(0x1C, 0x00);	// Ctrl1Reg: Internal Control 1: Normal mode
-				interface.writeByte(0x1A, 26);		// ODR
+				delay(5);
+				interface.writeByte(0x1A, 26);		// ODR: 26Hz
 				interface.writeByte(0x1B, 0xA0);	// Ctrl0Reg: BW=00, AutoSR=1, CM freq enable
 				interface.writeByte(0x1D, 0x10);	// Ctrl2Reg: Continuous mode enable
 				return true;
@@ -168,7 +201,8 @@ bool MagDriver::init(MagInterface&& interface, bool supports9ByteMags) {
 		}
 
 		logger.info("Found mag %s! Initializing", mag.name);
-
+		
+		delay(50);
 		if (!mag.setup(interface)) {
 			logger.error("Mag %s failed to initialize!", mag.name);
 			return false;
@@ -204,7 +238,14 @@ bool MagDriver::decodeRawSample(const uint8_t* rawSample, int16_t* outDecodedSam
 		return false;
 	}
 
-	return detectedMag->decodeRawSample(rawSample, detectedMag->dataWidth, outDecodedSample);
+	const bool decoded
+		= detectedMag->decodeRawSample(rawSample, detectedMag->dataWidth, outDecodedSample);
+	if (!decoded) {
+		return false;
+	}
+
+	applyMagAxisMapping(outDecodedSample);
+	return true;
 }
 
 const char* MagDriver::getAttachedMagName() const {

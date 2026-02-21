@@ -106,6 +106,22 @@ class SoftFusionSensor : public Sensor {
 		);
 	}};
 
+	bool shouldUpdateMagFusion() {
+		if constexpr (requires(Calib& c) { c.shouldUpdateMagFusion(); }) {
+			return calibrator.shouldUpdateMagFusion();
+		}
+		return true;
+	}
+
+	bool shouldUseMagSample(const sensor_real_t magSample[3]) {
+		if constexpr (requires(Calib& c, const sensor_real_t* sample) {
+						  c.shouldUseMagSample(sample);
+					  }) {
+			return calibrator.shouldUseMagSample(magSample);
+		}
+		return true;
+	}
+
 	void processAccelSample(const RawSensorT xyz[3], const sensor_real_t timeDelta) {
 		sensor_real_t accelData[]
 			= {static_cast<sensor_real_t>(xyz[0]),
@@ -149,7 +165,7 @@ class SoftFusionSensor : public Sensor {
 			calibrator.provideTempSample(lastReadTemperature);
 		}
 	}
-
+	sensor_real_t lastMagData[3];
 	void processMagSample(const RawSensorT xyz[3], const sensor_real_t timeDelta) {
 		if (!toggles.getToggle(SensorToggles::MagEnabled)) {
 			return;
@@ -159,14 +175,16 @@ class SoftFusionSensor : public Sensor {
 			   static_cast<sensor_real_t>(xyz[1]),
 			   static_cast<sensor_real_t>(xyz[2])};
 
-		// calibrator.scaleMagSample(magData);
-		m_fusion.updateMag(magData, timeDelta);
+		calibrator.scaleMagSample(magData);
+		const bool shouldUpdateMag = shouldUpdateMagFusion();
+		if (shouldUpdateMag && shouldUseMagSample(magData)) {
+			m_fusion.updateMag(magData, timeDelta);
+		}
+		calibrator.provideMagSample(xyz);
 
-		// m_Logger.debug( "Mag: %.2f, %.2f, %.2f",
-		// 	magData[0],
-		// 	magData[1],
-		// 	magData[2]
-		// );
+		lastMagData[0] = magData[0];
+		lastMagData[1] = magData[1];
+		lastMagData[2] = magData[2];
 	}
 
 public:
@@ -201,6 +219,10 @@ public:
 	void checkSensorTimeout() {
 		uint32_t now = millis();
 		constexpr uint32_t sensorTimeoutMillis = 2e3;  // 2 seconds
+		constexpr uint32_t magToggleGraceMillis = 3000; // 3 seconds after mag toggle
+		if (now - m_lastMagToggleMillis < magToggleGraceMillis) {
+			return;
+		}
 		if (m_lastRotationUpdateMillis + sensorTimeoutMillis > now) {
 			return;
 		}
@@ -246,19 +268,22 @@ public:
 		if (toggles.getToggle(SensorToggles::TempGradientCalibrationEnabled)) {
 			tempGradientCalculator.tick();
 		}
-		
-		constexpr uint32_t targetPollIntervalMicros = 6000;
+
+		constexpr uint32_t targetPollIntervalMicros = 4000;  // 4 ms = 250 Hz
 		now = micros();
 		uint32_t elapsed = now - m_lastPollTime;
+		bool isSamplePooled = false;
 		bool isGyroSamplePooled = false;
 		if (elapsed >= targetPollIntervalMicros) {
 			m_lastPollTime = now - (elapsed - targetPollIntervalMicros);
 			auto overwhelmed = m_sensor.bulkRead({
 				[&](const auto sample[3], float AccTs) {
 					processAccelSample(sample, AccTs);
+					isSamplePooled = true;
 				},
 				[&](const auto sample[3], float GyrTs) {
 					processGyroSample(sample, GyrTs);
+					isSamplePooled = true;
 					isGyroSamplePooled = true;
 				},
 				[&](int16_t sample, float TempTs) {
@@ -275,8 +300,8 @@ public:
 			if (overwhelmed) {
 				calibrator.signalOverwhelmed();
 			}
-
-			if (!isGyroSamplePooled) {
+			
+			if (!isSamplePooled) {
 				checkSensorTimeout();
 			}
 			else {
@@ -288,21 +313,35 @@ public:
 		// send new fusion values when time is up
 		now = micros();
 		elapsed = now - m_lastRotationPacketSent;
-		constexpr float maxSendRateHz = 100.0f;
-		constexpr uint32_t sendInterval = 1.0f / maxSendRateHz * 1e6f;
-		if (m_fusion.isUpdated() && elapsed >= sendInterval) {
-			m_lastRotationPacketSent = now - (elapsed - sendInterval);
+		// constexpr float maxSendRateHz = 100.0f;
+		// constexpr uint32_t sendInterval = 1.0f / maxSendRateHz * 1e6f;
+		constexpr uint32_t sendIntervalMicros = 10000;  // 10 ms = 100 Hz
+		if (m_fusion.isUpdated() && elapsed >= sendIntervalMicros) {
+			m_lastRotationPacketSent = now - (elapsed - sendIntervalMicros);
 
 			setFusedRotation(m_fusion.getQuaternionQuat());
 			setAcceleration(m_fusion.getLinearAccVec());
 			m_fusion.clearUpdated();
 			optimistic_yield(100);
 		}
-		
+
 		if (isGyroSamplePooled && calibrationDetector.update(m_fusion)) {
 			markRestCalibrationComplete();
 		}
 
+		// magnetometer toggling can cause a lot of I2C traffic, so change the polling state with a grace period.
+		if (m_hasPendingMagToggle) {
+			constexpr uint32_t magToggleDebounceMillis = 200;
+			const uint32_t nowMillis = millis();
+			if (nowMillis - m_lastMagToggleMillis >= magToggleDebounceMillis) {
+				if (m_pendingMagEnabled) {
+					magDriver.startPolling();
+				} else {
+					magDriver.stopPolling();
+				}
+				m_hasPendingMagToggle = false;
+			}
+		}
 	}
 
 	void motionSetup() final {
@@ -364,14 +403,10 @@ public:
 		if constexpr (Consts::SupportsMags) {
 			magAttached = magDriver.init(
 				SoftFusion::MagInterface{
-					.readByte
-					= [&](uint8_t address) { return m_sensor.readAux(address); },
+					.readByte = [&](uint8_t address) { return m_sensor.readAux(address); },
 					.writeByte = [&](uint8_t address, uint8_t value) { m_sensor.writeAux(address, value); },
-					.setDeviceId
-					= [&](uint8_t deviceId) { m_sensor.setAuxId(deviceId); },
-					.startPolling
-					= [&](uint8_t dataReg, SoftFusion::MagDataWidth dataWidth
-					  ) { m_sensor.startAuxPolling(dataReg, dataWidth); },
+					.setDeviceId = [&](uint8_t deviceId) { m_sensor.setAuxId(deviceId); },
+					.startPolling = [&](uint8_t dataReg, SoftFusion::MagDataWidth dataWidth) { m_sensor.startAuxPolling(dataReg, dataWidth); },
 					.stopPolling = [&]() { m_sensor.stopAuxPolling(); },
 				},
 				Consts::Supports9ByteMag
@@ -379,15 +414,17 @@ public:
 
 			if (magAttached && toggles.getToggle(SensorToggles::MagEnabled)) {
 				magDriver.startPolling();
+				calibrator.onMagEnabled();
 			}
 		}
 
 		toggles.onToggleChange([&](SensorToggles toggle, bool value) {
 			if (magAttached && (toggle == SensorToggles::MagEnabled)) {
+				m_lastMagToggleMillis = millis();
+				m_pendingMagEnabled = value;
+				m_hasPendingMagToggle = true;
 				if (value) {
-					magDriver.startPolling();
-				} else {
-					magDriver.stopPolling();
+					calibrator.onMagEnabled();
 				}
 			}
 		});
@@ -396,6 +433,8 @@ public:
 	void startCalibration(int calibrationType) final {
 		calibrator.startCalibration(calibrationType);
 	}
+
+	bool clearMagCalibration() final { return calibrator.clearMagCalibration(); }
 
 	[[nodiscard]] bool isFlagSupported(SensorToggles toggle) const final {
 		return toggle == SensorToggles::CalibrationEnabled
@@ -411,6 +450,9 @@ public:
 
 	SensorStatus m_status = SensorStatus::SENSOR_OFFLINE;
 	uint32_t m_lastPollTime = micros();
+	uint32_t m_lastMagToggleMillis = 0;
+	bool m_pendingMagEnabled = false;
+	bool m_hasPendingMagToggle = false;
 	uint32_t m_lastRotationUpdateMillis = 0;
 	uint32_t m_lastRotationPacketSent = 0;
 	uint32_t m_lastTemperaturePacketSent = 0;

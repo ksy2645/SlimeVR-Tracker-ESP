@@ -77,6 +77,25 @@ def format_value(val: Any, typ: str, key: str = "<unknown>") -> str:
     _validate_define_value(result, key)
     return result
 
+def _encode_mag_axis_remap(remap: Dict[str, str]) -> int:
+    axis_map = {
+        "X": 0,
+        "Y": 1,
+        "Z": 2,
+        "XN": 4,
+        "YN": 5,
+        "ZN": 6,
+    }
+
+    try:
+        x = axis_map[remap["x"]]
+        y = axis_map[remap["y"]]
+        z = axis_map[remap["z"]]
+    except KeyError as exc:
+        raise ValueError(f"Invalid MAG_AXIS_REMAP entry: missing/unknown key {exc}") from exc
+
+    return x | (y << 3) | (z << 6)
+
 
 def _build_board_flags(defaults: dict, board_name: str) -> List[str]:
     """Construct list of -D flags for one board."""
@@ -93,6 +112,10 @@ def _build_board_flags(defaults: dict, board_name: str) -> List[str]:
     def add(key: str, value: Any, value_type: str):
         if value is not None:
             args[key] = {"value": value, "type": value_type}
+
+    mag_axis_remap = values.get("MAG_AXIS_REMAP")
+    if mag_axis_remap:
+        add("MAG_AXIS_REMAP", _encode_mag_axis_remap(mag_axis_remap), "number")
 
     add('BOARD', board_name, 'raw')
     add('LED_PIN', values.get('LED').get('LED_PIN'), 'pin')

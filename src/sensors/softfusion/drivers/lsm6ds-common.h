@@ -23,6 +23,8 @@
 
 #pragma once
 
+#include <Arduino.h>
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -42,6 +44,7 @@ struct LSM6DSOutputHandler {
 
 	RegisterInterface& m_RegisterInterface;
 	SlimeVR::Logging::Logger& m_Logger;
+	uint32_t m_LastOverrunLogMillis = 0;
 
 #pragma pack(push, 1)
 	struct FifoEntryAligned {
@@ -69,8 +72,13 @@ struct LSM6DSOutputHandler {
 		const auto available_axes = fifo_status & FIFO_SAMPLES_MASK;
 		const auto fifo_bytes = available_axes * FullFifoEntrySize;
 		if (fifo_status & FIFO_OVERRUN_LATCHED_MASK) {
-			// FIFO overrun is expected to happen during startup and calibration
-			m_Logger.error("FIFO OVERRUN! This occuring during normal usage is an issue.");
+			// FIFO overrun is expected during startup and can happen during calibration.
+			// Throttle this warning to avoid log spam while still surfacing the issue.
+			uint32_t now = millis();
+			if (now - m_LastOverrunLogMillis > 1000) {
+				m_Logger.warn("FIFO overrun detected; polling may be too slow for current load");
+				m_LastOverrunLogMillis = now;
+			}
 		}
 
 		static constexpr size_t MaxFifoFramesPerRead
@@ -101,7 +109,9 @@ struct LSM6DSOutputHandler {
 					if (callbacks.processMagSample) {
 						int16_t mag[3]{0, 0, 0};
 						if (callbacks.decodeRawMagSample) {
-							callbacks.decodeRawMagSample(entry.raw, mag);
+							if( !callbacks.decodeRawMagSample(entry.raw, mag)) {
+								continue;
+							}
 						}
 						callbacks.processMagSample(mag, MagTs);
 					}
