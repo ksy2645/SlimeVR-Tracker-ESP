@@ -103,6 +103,13 @@ struct RuntimeCalibrationSensorConfig {
 	float M_B[3];
 	float M_Ainv[3][3];
 	float M_refNorm;
+
+	float A_sixSideOff[3];
+	float A_sixSideScale[3];
+
+	bool accelFullMatrixCalibrated;
+	float A_B[3];
+	float A_Ainv[3][3];
 };
 
 struct MPU6050SensorConfig {

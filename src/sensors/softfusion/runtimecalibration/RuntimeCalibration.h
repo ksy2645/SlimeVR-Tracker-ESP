@@ -30,8 +30,11 @@
 #include <cstdint>
 
 #include "../../../GlobalVars.h"
+#include "../../../calibration.h"
 #include "../../../configuration/Configuration.h"
 #include "AccelBiasCalibrationStep.h"
+#include "AccelFullMatrixCalibrationStep.h"
+#include "AccelSixSideCalibrationStep.h"
 #include "GyroBiasCalibrationStep.h"
 #include "MagCalibrationStep.h"
 #include "MotionlessCalibrationStep.h"
@@ -42,12 +45,16 @@
 #include "sensors/SensorFusion.h"
 #include "sensors/softfusion/CalibrationBase.h"
 
+#ifndef RUNTIME_CALIBRATION_ENABLE_RUNTIME_ACCEL_DEBUG_LOGS
+#define RUNTIME_CALIBRATION_ENABLE_RUNTIME_ACCEL_DEBUG_LOGS 0
+#endif
+
 namespace SlimeVR::Sensors::RuntimeCalibration {
 
 template <typename IMU>
 class RuntimeCalibrator : public Sensors::CalibrationBase<IMU> {
 public:
-	static constexpr bool HasUpsideDownCalibration = false;
+	static constexpr bool HasUpsideDownCalibration = true;
 
 	using Base = Sensors::CalibrationBase<IMU>;
 	using Self = RuntimeCalibrator<IMU>;
@@ -63,6 +70,8 @@ public:
 		SensorToggleState& toggles
 	)
 		: Base{fusion, imu, sensorId, logger, toggles}
+		, accelFullMatrixCalibrationStep{calibration, logger}
+		, accelSixSideCalibrationStep{calibration, logger, static_cast<float>(Consts::AScale)}
 		, magCalibrationStep{calibration, logger} {
 		calibration.T_Ts = Consts::getDefaultTempTs();
 		activeCalibration.T_Ts = Consts::getDefaultTempTs();
@@ -72,15 +81,17 @@ public:
 	) final {
 		return sensorCalibration.type
 				== SlimeVR::Configuration::SensorConfigType::RUNTIME_CALIBRATION
-			&& (sensorCalibration.data.sfusion.ImuType == IMU::Type)
-			&& (sensorCalibration.data.sfusion.MotionlessDataLen
+			&& (sensorCalibration.data.runtimeCalibration.ImuType == IMU::Type)
+			&& (sensorCalibration.data.runtimeCalibration.MotionlessDataLen
 				== Base::MotionlessCalibDataSize());
 	}
 
 	void assignCalibration(const Configuration::SensorConfig& sensorCalibration) final {
 		calibration = sensorCalibration.data.runtimeCalibration;
 		activeCalibration = sensorCalibration.data.runtimeCalibration;
-		if (!toggles.getToggle(SensorToggles::CalibrationEnabled)) {
+		const bool calibrationEnabled
+			= toggles.getToggle(SensorToggles::CalibrationEnabled);
+		if (!calibrationEnabled) {
 			activeCalibration.gyroPointsCalibrated = 0;
 			for (size_t i = 0; i < 3; i++) {
 				activeCalibration.G_off1[i] = 0;
@@ -90,12 +101,33 @@ public:
 			for (size_t i = 0; i < 3; i++) {
 				activeCalibration.accelCalibrated[i] = false;
 				activeCalibration.A_off[i] = 0;
+				activeCalibration.A_sixSideOff[i] = 0;
+				activeCalibration.A_sixSideScale[i] = 1.0f;
+				activeCalibration.A_B[i] = 0.0f;
+				for (size_t j = 0; j < 3; j++) {
+					activeCalibration.A_Ainv[i][j] = (i == j) ? 1.0f : 0.0f;
+				}
 			}
+			activeCalibration.accelFullMatrixCalibrated = false;
+			activeAccelFullMatrixValid = false;
+			pendingMagCalibrationRequest = false;
 		} else {
 			calculateZROChange();
-		}
 
-		{
+			if (!isAccelFullMatrixCalibrationMissing(calibration)
+				&& !isAccelFullMatrixCalibrationValid(calibration)) {
+				logger.warn(
+					"Invalid accel full-matrix calibration data found, clearing it"
+				);
+				resetAccelFullMatrixCalibration(calibration);
+			}
+			syncAccelFullMatrixCalibrationToActive();
+
+			if (isAccelSixSideCalibrationMissing(calibration)) {
+				resetAccelSixSideCalibration(calibration);
+			}
+			syncAccelSixSideCalibrationToActive();
+
 			if (!isMagCalibrationMissing(calibration)
 				&& !isMagCalibrationValid(calibration)) {
 				logger.warn("Invalid mag calibration data found, clearing it");
@@ -129,12 +161,27 @@ public:
 		nextCalibrationStep = CalibrationStepEnum::SAMPLING_RATE;
 
 		calculateZROChange();
+		syncAccelFullMatrixCalibrationToActive();
 		syncMagCalibrationToActive();
 
 		printCalibration();
 	}
 
+	void checkStartupCalibration() final { initializeStartupAccelSixSideTrigger(); }
+
+	void startCalibration(int calibrationType) final {
+		if (!isCalibrationRequestEnabled()) {
+			return;
+		}
+
+		cancelActiveCalibrationIfRunning();
+		handleExternalCalibrationRequest(calibrationType);
+	}
+
 	void tick() final {
+		updateStartupAccelSixSideTrigger();
+		maybeStartAccelFullMatrixCalibration();
+		maybeStartAccelSixSideCalibration();
 		maybeStartMagCalibration();
 		if (!isMagCalibrationReady()) {
 			fusion.setMagFusionEnabled(false);
@@ -190,9 +237,64 @@ public:
 	}
 
 	void scaleAccelSample(sensor_real_t accelSample[3]) final {
-		accelSample[0] = accelSample[0] * Consts::AScale - activeCalibration.A_off[0];
-		accelSample[1] = accelSample[1] * Consts::AScale - activeCalibration.A_off[1];
-		accelSample[2] = accelSample[2] * Consts::AScale - activeCalibration.A_off[2];
+		sensor_real_t rawAccelCounts[3] = {
+			accelSample[0],
+			accelSample[1],
+			accelSample[2],
+		};
+		sensor_real_t rawAccelMs2[3] = {0.0f, 0.0f, 0.0f};
+		for (size_t i = 0; i < 3; i++) {
+			rawAccelMs2[i] = accelSample[i] * Consts::AScale;
+		}
+
+		const bool useAccelFullMatrix = activeAccelFullMatrixValid;
+		if (useAccelFullMatrix) {
+			float tmp[3];
+			tmp[0] = rawAccelCounts[0] - activeCalibration.A_B[0];
+			tmp[1] = rawAccelCounts[1] - activeCalibration.A_B[1];
+			tmp[2] = rawAccelCounts[2] - activeCalibration.A_B[2];
+
+			accelSample[0] = (activeCalibration.A_Ainv[0][0] * tmp[0]
+							  + activeCalibration.A_Ainv[0][1] * tmp[1]
+							  + activeCalibration.A_Ainv[0][2] * tmp[2])
+						   * Consts::AScale;
+			accelSample[1] = (activeCalibration.A_Ainv[1][0] * tmp[0]
+							  + activeCalibration.A_Ainv[1][1] * tmp[1]
+							  + activeCalibration.A_Ainv[1][2] * tmp[2])
+						   * Consts::AScale;
+			accelSample[2] = (activeCalibration.A_Ainv[2][0] * tmp[0]
+							  + activeCalibration.A_Ainv[2][1] * tmp[1]
+							  + activeCalibration.A_Ainv[2][2] * tmp[2])
+						   * Consts::AScale;
+		} else {
+			for (size_t i = 0; i < 3; i++) {
+				accelSample[i] = rawAccelMs2[i] * activeCalibration.A_sixSideScale[i]
+							   - activeCalibration.A_sixSideOff[i];
+			}
+		}
+
+#if RUNTIME_CALIBRATION_ENABLE_RUNTIME_ACCEL_DEBUG_LOGS
+		const bool restDetected = fusion.getRestDetected();
+		if (useAccelFullMatrix) {
+			captureAccelDebugSnapshot(
+				accelFullMatrixRestSnapshot,
+				rawAccelCounts,
+				rawAccelMs2,
+				accelSample,
+				restDetected
+			);
+			maybeLogAccelFullMatrixDebug();
+		} else {
+			captureAccelDebugSnapshot(
+				accelSixSideRestSnapshot,
+				rawAccelCounts,
+				rawAccelMs2,
+				accelSample,
+				restDetected
+			);
+			maybeLogAccelSixSideDebug();
+		}
+#endif
 	}
 
 	float getAccelTimestep() final { return activeCalibration.A_Ts; }
@@ -230,7 +332,7 @@ public:
 	}
 
 	float getGyroTimestep() final { return activeCalibration.G_Ts; }
-	
+
 	float getMagTimestep() final { return activeCalibration.M_Ts; }
 
 	float getTempTimestep() final { return activeCalibration.T_Ts; }
@@ -247,6 +349,7 @@ public:
 
 	void provideAccelSample(const RawSensorT accelSample[3]) final {
 		if (isCalibrating) {
+			currentStep->setRestDetected(fusion.getRestDetected());
 			currentStep->processAccelSample(accelSample);
 		}
 	}
@@ -349,6 +452,8 @@ private:
 		MOTIONLESS,
 		GYRO_BIAS,
 		ACCEL_BIAS,
+		ACCEL_SIX_SIDE,
+		ACCEL_FULL_MATRIX,
 		MAG_CALIB,
 	};
 
@@ -356,6 +461,83 @@ private:
 	static constexpr float maxValidMagReferenceNorm = 100000.0f;
 	static constexpr float magNormRejectRelativeThreshold = 0.07f;
 	static constexpr float magNormRejectAbsoluteThreshold = 20.0f;
+	static constexpr uint8_t startupAccelSixSideWindowSeconds = 2;
+	static constexpr float startupAccelSixSideMinAbsGravityZ = 0.75f;
+	static constexpr uint16_t startupAccelSixSideBootZGateMinSettlingMs = 250;
+	static constexpr uint8_t startupAccelSixSideBootZGateSampleCount = 12;
+
+	void resetStartupAccelSixSideBootGateSampling() {
+		startupAccelSixSideBootZAccum = 0.0f;
+		startupAccelSixSideBootZSamples = 0;
+	}
+
+	void clearPendingAccelCalibrationRequests() {
+		pendingAccelFullMatrixCalibrationRequest = false;
+		pendingAccelSixSideCalibrationRequest = false;
+	}
+
+	void initializeStartupAccelSixSideTrigger() {
+		startupAccelSixSideWindowStartMillis = millis();
+		clearPendingAccelCalibrationRequests();
+		startupAccelSixSideMonitoringEnabled = false;
+		startupAccelSixSideBootZGatePending
+			= toggles.getToggle(SensorToggles::CalibrationEnabled);
+		resetStartupAccelSixSideBootGateSampling();
+	}
+
+	bool isCalibrationRequestEnabled() {
+		if (!toggles.getToggle(SensorToggles::CalibrationEnabled)) {
+			logger.warn("Calibration is disabled");
+			return false;
+		}
+		return true;
+	}
+
+	void cancelActiveCalibrationIfRunning() {
+		if (!isCalibrating) {
+			return;
+		}
+
+		currentStep->cancel();
+		isCalibrating = false;
+	}
+
+	void requestAccelSixSideCalibration() {
+		pendingAccelSixSideCalibrationRequest = true;
+		pendingAccelFullMatrixCalibrationRequest = false;
+		disableStartupAccelSixSideTrigger();
+		logger.info("Requested accel six-side calibration");
+	}
+
+	void requestAccelFullMatrixCalibration() {
+		pendingAccelFullMatrixCalibrationRequest = true;
+		pendingAccelSixSideCalibrationRequest = false;
+		disableStartupAccelSixSideTrigger();
+		logger.info("Requested accel full-matrix calibration");
+	}
+
+	void requestMagCalibration() {
+		pendingMagCalibrationRequest = true;
+		magCalibrationAttemptedSinceBoot = false;
+		logger.info("Requested mag calibration");
+	}
+
+	void handleExternalCalibrationRequest(int calibrationType) {
+		switch (calibrationType) {
+			case CALIBRATION_TYPE_EXTERNAL_ACCEL:
+				requestAccelSixSideCalibration();
+				break;
+			case CALIBRATION_TYPE_EXTERNAL_ACCEL_FULL_MATRIX:
+				requestAccelFullMatrixCalibration();
+				break;
+			case CALIBRATION_TYPE_EXTERNAL_MAG:
+				requestMagCalibration();
+				break;
+			default:
+				logger.warn("Unsupported calibration type: %d", calibrationType);
+				break;
+		}
+	}
 
 	void computeNextCalibrationStep() {
 		if (!calibration.motionlessCalibrated && Base::HasMotionlessCalib) {
@@ -416,6 +598,41 @@ private:
 					skippedAStep = true;
 				}
 				break;
+			case CalibrationStepEnum::ACCEL_SIX_SIDE:
+				// sync
+				syncAccelSixSideCalibrationToActive();
+				computeNextCalibrationStep();
+				break;
+			case CalibrationStepEnum::ACCEL_FULL_MATRIX: {
+				const bool hasAccelFullMatrixResult
+					= accelFullMatrixCalibrationStep.hasResult();
+				if (!hasAccelFullMatrixResult) {
+					logger.warn(
+						"Accel full-matrix calibration finished without result"
+					);
+					resetAccelFullMatrixCalibration(calibration);
+				} else {
+					const auto& out
+						= accelFullMatrixCalibrationStep.getResult().value();
+					calibration.accelFullMatrixCalibrated = true;
+					for (uint8_t i = 0; i < 3; i++) {
+						calibration.A_B[i] = out.A_B[i];
+						for (uint8_t j = 0; j < 3; j++) {
+							calibration.A_Ainv[i][j] = out.A_Ainv[i][j];
+						}
+					}
+				}
+
+				syncAccelFullMatrixCalibrationToActive();
+				computeNextCalibrationStep();
+
+				if (print) {
+					if (!hasAccelFullMatrixResult) {
+						logger.warn("Accel full-matrix calibration failed");
+					}
+				}
+				break;
+			}
 			case CalibrationStepEnum::MAG_CALIB:
 				if (!isMagCalibrationValid(calibration)) {
 					logger.warn(
@@ -446,6 +663,13 @@ private:
 			return;
 		}
 
+		if (pendingAccelSixSideCalibrationRequest
+			|| nextCalibrationStep == CalibrationStepEnum::ACCEL_SIX_SIDE
+			|| pendingAccelFullMatrixCalibrationRequest
+			|| nextCalibrationStep == CalibrationStepEnum::ACCEL_FULL_MATRIX) {
+			return;
+		}
+
 		if (magCalibrationAttemptedSinceBoot) {
 			pendingMagCalibrationRequest = false;
 			return;
@@ -470,6 +694,413 @@ private:
 		pendingMagCalibrationRequest = false;
 		magCalibrationAttemptedSinceBoot = true;
 	}
+
+	void maybeStartAccelFullMatrixCalibration() {
+		if (!pendingAccelFullMatrixCalibrationRequest) {
+			return;
+		}
+
+		if (isCalibrating
+			|| nextCalibrationStep == CalibrationStepEnum::SAMPLING_RATE) {
+			return;
+		}
+
+		nextCalibrationStep = CalibrationStepEnum::ACCEL_FULL_MATRIX;
+		currentStep = &accelFullMatrixCalibrationStep;
+		pendingAccelFullMatrixCalibrationRequest = false;
+		disableStartupAccelSixSideTrigger();
+		logger.info("Starting accel full-matrix calibration");
+	}
+
+	void maybeStartAccelSixSideCalibration() {
+		if (!pendingAccelSixSideCalibrationRequest) {
+			return;
+		}
+
+		if (pendingAccelFullMatrixCalibrationRequest
+			|| nextCalibrationStep == CalibrationStepEnum::ACCEL_FULL_MATRIX) {
+			return;
+		}
+
+		if (isCalibrating
+			|| nextCalibrationStep == CalibrationStepEnum::SAMPLING_RATE) {
+			return;
+		}
+
+		nextCalibrationStep = CalibrationStepEnum::ACCEL_SIX_SIDE;
+		currentStep = &accelSixSideCalibrationStep;
+		pendingAccelSixSideCalibrationRequest = false;
+		disableStartupAccelSixSideTrigger();
+		logger.info("Starting accel six-side calibration");
+	}
+
+	void updateStartupAccelSixSideTrigger() {
+		if (!startupAccelSixSideBootZGatePending
+			&& !startupAccelSixSideMonitoringEnabled) {
+			return;
+		}
+
+		const uint64_t elapsed = millis() - startupAccelSixSideWindowStartMillis;
+		if (elapsed > startupAccelSixSideWindowSeconds * 1e3) {
+			disableStartupAccelSixSideTrigger();
+			return;
+		}
+
+		if (pendingAccelSixSideCalibrationRequest
+			|| pendingAccelFullMatrixCalibrationRequest) {
+			return;
+		}
+
+		sensor_real_t gravityRaw[3];
+		SensorFusion::calcGravityVec(fusion.getQuaternion(), gravityRaw);
+		const float gravityZ = static_cast<float>(gravityRaw[2]);
+		if (!std::isfinite(gravityZ)) {
+			return;
+		}
+
+		if (startupAccelSixSideBootZGatePending) {
+			if (elapsed < startupAccelSixSideBootZGateMinSettlingMs) {
+				return;
+			}
+
+			startupAccelSixSideBootZAccum += gravityZ;
+			startupAccelSixSideBootZSamples++;
+
+			const uint64_t windowMillis = startupAccelSixSideWindowSeconds * 1e3;
+			const bool shouldForceDecisionNearTimeout = elapsed + 50 >= windowMillis;
+			const bool hasEnoughBootZSamples = startupAccelSixSideBootZSamples
+											>= startupAccelSixSideBootZGateSampleCount;
+			if (!hasEnoughBootZSamples && !shouldForceDecisionNearTimeout) {
+				return;
+			}
+
+			startupAccelSixSideBootZGatePending = false;
+			const float bootAvgZ = startupAccelSixSideBootZAccum
+								 / static_cast<float>(startupAccelSixSideBootZSamples);
+			if (bootAvgZ <= -startupAccelSixSideMinAbsGravityZ) {
+				startupAccelSixSideMonitoringEnabled = true;
+				logger.info(
+					"Startup six-side trigger enabled (boot negative Z detected, "
+					"avgZ=%.3f, n=%u)",
+					bootAvgZ,
+					static_cast<unsigned>(startupAccelSixSideBootZSamples)
+				);
+			} else {
+				startupAccelSixSideMonitoringEnabled = false;
+				logger.info(
+					"Startup six-side trigger skipped (boot Z was not negative, "
+					"avgZ=%.3f, n=%u)",
+					bootAvgZ,
+					static_cast<unsigned>(startupAccelSixSideBootZSamples)
+				);
+			}
+			return;
+		}
+
+		if (!startupAccelSixSideMonitoringEnabled) {
+			return;
+		}
+
+		if (gravityZ >= startupAccelSixSideMinAbsGravityZ) {
+			pendingAccelSixSideCalibrationRequest = true;
+			disableStartupAccelSixSideTrigger();
+			logger.info(
+				"Startup flip detected (positive Z), scheduling accel six-side "
+				"calibration"
+			);
+		}
+	}
+
+	void disableStartupAccelSixSideTrigger() {
+		startupAccelSixSideBootZGatePending = false;
+		startupAccelSixSideMonitoringEnabled = false;
+		resetStartupAccelSixSideBootGateSampling();
+	}
+
+	void syncAccelSixSideCalibrationToActive() {
+		for (uint8_t i = 0; i < 3; i++) {
+			activeCalibration.A_sixSideOff[i] = calibration.A_sixSideOff[i];
+			activeCalibration.A_sixSideScale[i] = calibration.A_sixSideScale[i];
+		}
+	}
+
+	void syncAccelFullMatrixCalibrationToActive() {
+		activeCalibration.accelFullMatrixCalibrated
+			= calibration.accelFullMatrixCalibrated;
+		for (uint8_t i = 0; i < 3; i++) {
+			activeCalibration.A_B[i] = calibration.A_B[i];
+			for (uint8_t j = 0; j < 3; j++) {
+				activeCalibration.A_Ainv[i][j] = calibration.A_Ainv[i][j];
+			}
+		}
+		activeAccelFullMatrixValid
+			= toggles.getToggle(SensorToggles::CalibrationEnabled)
+		   && isAccelFullMatrixCalibrationValid(activeCalibration);
+	}
+
+	const bool isAccelFullMatrixCalibrationMissing(
+		const Configuration::RuntimeCalibrationSensorConfig& config
+	) const {
+		return !config.accelFullMatrixCalibrated;
+	}
+
+	bool isAccelFullMatrixCalibrationValid(
+		const Configuration::RuntimeCalibrationSensorConfig& config
+	) const {
+		if (!config.accelFullMatrixCalibrated) {
+			return false;
+		}
+
+		float diagonalAbs[3]{0.0f, 0.0f, 0.0f};
+		for (uint8_t i = 0; i < 3; i++) {
+			if (!std::isfinite(config.A_B[i])) {
+				return false;
+			}
+
+			for (uint8_t j = 0; j < 3; j++) {
+				const float v = config.A_Ainv[i][j];
+				if (!std::isfinite(v) || std::abs(v) > 20.0f) {
+					return false;
+				}
+			}
+			diagonalAbs[i] = std::abs(config.A_Ainv[i][i]);
+		}
+
+		const float meanDiagonal
+			= (diagonalAbs[0] + diagonalAbs[1] + diagonalAbs[2]) / 3.0f;
+		if (!std::isfinite(meanDiagonal) || meanDiagonal < 1e-4f
+			|| meanDiagonal > 10.0f) {
+			return false;
+		}
+
+		const float diagonalTolerance = std::max(meanDiagonal * 0.6f, 0.05f);
+		for (uint8_t i = 0; i < 3; i++) {
+			if (std::abs(diagonalAbs[i] - meanDiagonal) > diagonalTolerance) {
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	static void resetAccelFullMatrixCalibration(
+		Configuration::RuntimeCalibrationSensorConfig& calibration
+	) {
+		calibration.accelFullMatrixCalibrated = false;
+		for (uint8_t i = 0; i < 3; i++) {
+			calibration.A_B[i] = 0.0f;
+			for (uint8_t j = 0; j < 3; j++) {
+				calibration.A_Ainv[i][j] = (i == j) ? 1.0f : 0.0f;
+			}
+		}
+	}
+
+	const bool isAccelSixSideCalibrationMissing(
+		const Configuration::RuntimeCalibrationSensorConfig& config
+	) const {
+		constexpr float epsilon = 1e-6f;
+		for (uint8_t i = 0; i < 3; i++) {
+			if (std::abs(config.A_sixSideOff[i]) > epsilon
+				|| std::abs(config.A_sixSideScale[i] - 1.0f) > epsilon) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	static void resetAccelSixSideCalibration(
+		Configuration::RuntimeCalibrationSensorConfig& calibration
+	) {
+		for (uint8_t i = 0; i < 3; i++) {
+			calibration.A_sixSideOff[i] = 0.0f;
+			calibration.A_sixSideScale[i] = 1.0f;
+		}
+	}
+
+#if RUNTIME_CALIBRATION_ENABLE_RUNTIME_ACCEL_DEBUG_LOGS
+	struct AccelDebugSnapshot {
+		bool valid = false;
+		uint64_t captureMillis = 0;
+		sensor_real_t rawCounts[3] = {0.0f, 0.0f, 0.0f};
+		sensor_real_t rawMs2[3] = {0.0f, 0.0f, 0.0f};
+		sensor_real_t scaledMs2[3] = {0.0f, 0.0f, 0.0f};
+	};
+
+	static void copyAccelVector(const sensor_real_t src[3], sensor_real_t dst[3]) {
+		for (uint8_t i = 0; i < 3; i++) {
+			dst[i] = src[i];
+		}
+	}
+
+	static float accelVectorNorm(const sensor_real_t v[3]) {
+		return std::sqrt(static_cast<float>(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]));
+	}
+
+	static bool isFiniteAccelVector(const sensor_real_t v[3]) {
+		return std::isfinite(static_cast<float>(v[0]))
+			&& std::isfinite(static_cast<float>(v[1]))
+			&& std::isfinite(static_cast<float>(v[2]));
+	}
+
+	static bool isValidAccelDebugSample(
+		const sensor_real_t rawCounts[3],
+		const sensor_real_t rawMs2[3],
+		const sensor_real_t scaledMs2[3]
+	) {
+		if (!isFiniteAccelVector(rawCounts) || !isFiniteAccelVector(rawMs2)
+			|| !isFiniteAccelVector(scaledMs2)) {
+			return false;
+		}
+
+		const bool allMinusOne = rawCounts[0] == static_cast<sensor_real_t>(-1.0f)
+							  && rawCounts[1] == static_cast<sensor_real_t>(-1.0f)
+							  && rawCounts[2] == static_cast<sensor_real_t>(-1.0f);
+		if (allMinusOne) {
+			return false;
+		}
+
+		const float rawNorm = accelVectorNorm(rawMs2);
+		if (!std::isfinite(rawNorm) || rawNorm < 1.0f || rawNorm > 30.0f) {
+			return false;
+		}
+
+		return true;
+	}
+
+	static void captureAccelDebugSnapshot(
+		AccelDebugSnapshot& snapshot,
+		const sensor_real_t rawCounts[3],
+		const sensor_real_t rawMs2[3],
+		const sensor_real_t scaledMs2[3],
+		bool restDetected
+	) {
+		if (!restDetected) {
+			return;
+		}
+		if (!isValidAccelDebugSample(rawCounts, rawMs2, scaledMs2)) {
+			return;
+		}
+
+		snapshot.valid = true;
+		snapshot.captureMillis = millis();
+		copyAccelVector(rawCounts, snapshot.rawCounts);
+		copyAccelVector(rawMs2, snapshot.rawMs2);
+		copyAccelVector(scaledMs2, snapshot.scaledMs2);
+	}
+
+	void maybeLogAccelSixSideDebug() {
+		const uint64_t now = millis();
+		if (now - lastAccelSixSideDebugLogMillis < accelSixSideDebugLogIntervalMs) {
+			return;
+		}
+		if (!accelSixSideRestSnapshot.valid) {
+			return;
+		}
+		lastAccelSixSideDebugLogMillis = now;
+
+		const sensor_real_t* logRawCounts = accelSixSideRestSnapshot.rawCounts;
+		const sensor_real_t* logRawMs2 = accelSixSideRestSnapshot.rawMs2;
+		const sensor_real_t* logScaledMs2 = accelSixSideRestSnapshot.scaledMs2;
+		const bool logRestDetected = true;
+		const uint32_t snapshotAgeMs
+			= static_cast<uint32_t>(now - accelSixSideRestSnapshot.captureMillis);
+		accelSixSideRestSnapshot.valid = false;
+
+		const float rawNorm = accelVectorNorm(logRawMs2);
+		const float scaledNorm = accelVectorNorm(logScaledMs2);
+		const float normDelta = scaledNorm - rawNorm;
+		const float normDeltaPct
+			= rawNorm > 1e-6f ? (normDelta / rawNorm) * 100.0f : 0.0f;
+
+		logger.info(
+			"Accel6 dbg raw[cnt]=%.2f %.2f %.2f raw[m/s2]=%.3f %.3f %.3f "
+			"scaled[m/s2]=%.3f %.3f %.3f rest=%u age_ms=%u |a|raw=%.3f |a|scaled=%.3f "
+			"d|a|=%.3f d%%=%.2f",
+
+			logRawCounts[0],
+			logRawCounts[1],
+			logRawCounts[2],
+			logRawMs2[0],
+			logRawMs2[1],
+			logRawMs2[2],
+			logScaledMs2[0],
+			logScaledMs2[1],
+			logScaledMs2[2],
+			logRestDetected ? 1u : 0u,
+			static_cast<unsigned>(snapshotAgeMs),
+			rawNorm,
+			scaledNorm,
+			normDelta,
+			normDeltaPct
+		);
+	}
+
+	void maybeLogAccelFullMatrixDebug() {
+		const uint64_t now = millis();
+		if (now - lastAccelFullMatrixDebugLogMillis
+			< accelFullMatrixDebugLogIntervalMs) {
+			return;
+		}
+		if (!accelFullMatrixRestSnapshot.valid) {
+			return;
+		}
+		lastAccelFullMatrixDebugLogMillis = now;
+
+		const sensor_real_t* logRawCounts = accelFullMatrixRestSnapshot.rawCounts;
+		const sensor_real_t* logRawMs2 = accelFullMatrixRestSnapshot.rawMs2;
+		const sensor_real_t* logScaledMs2 = accelFullMatrixRestSnapshot.scaledMs2;
+
+		const bool logRestDetected = true;
+		const uint32_t snapshotAgeMs
+			= static_cast<uint32_t>(now - accelFullMatrixRestSnapshot.captureMillis);
+		accelFullMatrixRestSnapshot.valid = false;
+
+		const float rawNorm = accelVectorNorm(logRawMs2);
+		const float scaledNorm = accelVectorNorm(logScaledMs2);
+		const float normDelta = scaledNorm - rawNorm;
+		const float normDeltaPct
+			= rawNorm > 1e-6f ? (normDelta / rawNorm) * 100.0f : 0.0f;
+
+		logger.info(
+			"AccelFM dbg raw[cnt]=%.2f %.2f %.2f raw[m/s2]=%.3f %.3f %.3f "
+			"scaled[m/s2]=%.3f %.3f %.3f rest=%u age_ms=%u |a|raw=%.3f "
+			"|a|scaled=%.3f d|a|=%.3f d%%=%.2f",
+			logRawCounts[0],
+			logRawCounts[1],
+			logRawCounts[2],
+			logRawMs2[0],
+			logRawMs2[1],
+			logRawMs2[2],
+			logScaledMs2[0],
+			logScaledMs2[1],
+			logScaledMs2[2],
+			logRestDetected ? 1u : 0u,
+			static_cast<unsigned>(snapshotAgeMs),
+			rawNorm,
+			scaledNorm,
+			normDelta,
+			normDeltaPct
+		);
+		// logger.info(
+		// 	"AccelFM dbg Ainv row0=%.6f %.6f %.6f",
+		// 	activeCalibration.A_Ainv[0][0],
+		// 	activeCalibration.A_Ainv[0][1],
+		// 	activeCalibration.A_Ainv[0][2]
+		// );
+		// logger.info(
+		// 	"AccelFM dbg Ainv row1=%.6f %.6f %.6f",
+		// 	activeCalibration.A_Ainv[1][0],
+		// 	activeCalibration.A_Ainv[1][1],
+		// 	activeCalibration.A_Ainv[1][2]
+		// );
+		// logger.info(
+		// 	"AccelFM dbg Ainv row2=%.6f %.6f %.6f",
+		// 	activeCalibration.A_Ainv[2][0],
+		// 	activeCalibration.A_Ainv[2][1],
+		// 	activeCalibration.A_Ainv[2][2]
+		// );
+	}
+#endif
 
 	bool shouldRequestMagCalibration(bool magCalibrationReady) const {
 		return toggles.getToggle(SensorToggles::MagEnabled) && !magCalibrationReady
@@ -588,12 +1219,13 @@ private:
 		GYRO_BIAS = 4,
 		ACCEL_BIAS = 8,
 		MAG_CALIB = 16,
+		ACCEL_EXTEND = 32,
 	};
 
 	static constexpr CalibrationPrintFlags PrintAllCalibration
 		= CalibrationPrintFlags::TIMESTEPS | CalibrationPrintFlags::MOTIONLESS
 		| CalibrationPrintFlags::GYRO_BIAS | CalibrationPrintFlags::ACCEL_BIAS
-		| CalibrationPrintFlags::MAG_CALIB;
+		| CalibrationPrintFlags::MAG_CALIB | CalibrationPrintFlags::ACCEL_EXTEND;
 
 	void printCalibration(CalibrationPrintFlags toPrint = PrintAllCalibration) {
 		if (any(toPrint & CalibrationPrintFlags::TIMESTEPS)) {
@@ -662,6 +1294,45 @@ private:
 			}
 		}
 
+		if (any(toPrint & CalibrationPrintFlags::ACCEL_EXTEND)) {
+			if (isAccelSixSideCalibrationMissing(calibration)) {
+				logger.info("Accel six-side not calibrated");
+			} else {
+				logger.info(
+					"Accel six-side scale: %f %f %f",
+					calibration.A_sixSideScale[0],
+					calibration.A_sixSideScale[1],
+					calibration.A_sixSideScale[2]
+				);
+				logger.info(
+					"Accel six-side offset: %f %f %f",
+					calibration.A_sixSideOff[0],
+					calibration.A_sixSideOff[1],
+					calibration.A_sixSideOff[2]
+				);
+			}
+
+			if (isAccelFullMatrixCalibrationValid(calibration)) {
+				logger.info(
+					"Accel full-matrix A_B: %f %f %f",
+					calibration.A_B[0],
+					calibration.A_B[1],
+					calibration.A_B[2]
+				);
+				logger.info("Accel full-matrix A_Ainv:");
+				for (uint8_t i = 0; i < 3; i++) {
+					logger.info(
+						"  %f %f %f",
+						calibration.A_Ainv[i][0],
+						calibration.A_Ainv[i][1],
+						calibration.A_Ainv[i][2]
+					);
+				}
+			} else {
+				logger.info("Accel full-matrix not calibrated");
+			}
+		}
+
 		if (any(toPrint & CalibrationPrintFlags::MAG_CALIB)) {
 			if (isMagCalibrationReady()) {
 				logger.info(
@@ -701,6 +1372,8 @@ private:
 		calibration,
 		static_cast<float>(Consts::AScale)
 	};
+	AccelFullMatrixCalibrationStep<RawSensorT> accelFullMatrixCalibrationStep;
+	AccelSixSideCalibrationStep<RawSensorT> accelSixSideCalibrationStep;
 	MagCalibrationStep<RawSensorT> magCalibrationStep;
 	NullCalibrationStep<RawSensorT> nullCalibrationStep{calibration};
 
@@ -711,6 +1384,21 @@ private:
 	bool lastTickRest = false;
 	bool pendingMagCalibrationRequest = false;
 	bool magCalibrationAttemptedSinceBoot = false;
+	bool startupAccelSixSideBootZGatePending = false;
+	bool startupAccelSixSideMonitoringEnabled = false;
+	float startupAccelSixSideBootZAccum = 0.0f;
+	uint16_t startupAccelSixSideBootZSamples = 0;
+	bool pendingAccelFullMatrixCalibrationRequest = false;
+	bool pendingAccelSixSideCalibrationRequest = false;
+	uint64_t startupAccelSixSideWindowStartMillis = 0;
+#if RUNTIME_CALIBRATION_ENABLE_RUNTIME_ACCEL_DEBUG_LOGS
+	static constexpr uint32_t accelSixSideDebugLogIntervalMs = 3000;
+	uint64_t lastAccelSixSideDebugLogMillis = 0;
+	static constexpr uint32_t accelFullMatrixDebugLogIntervalMs = 3000;
+	uint64_t lastAccelFullMatrixDebugLogMillis = 0;
+	AccelDebugSnapshot accelSixSideRestSnapshot{};
+	AccelDebugSnapshot accelFullMatrixRestSnapshot{};
+#endif
 
 	SlimeVR::Configuration::RuntimeCalibrationSensorConfig calibration{
 		// let's create here transparent calibration that doesn't affect input data
@@ -737,12 +1425,20 @@ private:
 
 		.M_B = {0.0, 0.0, 0.0},
 		.M_Ainv = {{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}},
-		.M_refNorm = 0.0f
+		.M_refNorm = 0.0f,
+
+		.A_sixSideOff = {0.0, 0.0, 0.0},
+		.A_sixSideScale = {1.0, 1.0, 1.0},
+
+		.accelFullMatrixCalibrated = false,
+		.A_B = {0.0, 0.0, 0.0},
+		.A_Ainv = {{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}}
 	};
 
 	float activeZROChange = 0;
 
 	Configuration::RuntimeCalibrationSensorConfig activeCalibration = calibration;
+	bool activeAccelFullMatrixValid = false;
 
 	using Base::fusion;
 	using Base::logger;

@@ -61,6 +61,13 @@ void LEDManager::pattern(unsigned long timeon, unsigned long timeoff, int times)
 	}
 }
 
+void LEDManager::resetPatternState() {
+	off();
+	m_CurrentStage = OFF;
+	m_CurrentCount = 0;
+	m_Timer = 0;
+}
+
 void LEDManager::update() {
 	unsigned long time = millis();
 	unsigned long diff = time - m_LastUpdate;
@@ -74,6 +81,11 @@ void LEDManager::update() {
 
 	unsigned int length = 0;
 	unsigned int count = 0;
+
+	if (statusManager.hasStatus(Status::ACCEL_FULL_MATRIX_CALIBRATING)) {
+		resetPatternState();
+		return;
+	}
 
 	if (statusManager.hasStatus(Status::LOW_BATTERY)) {
 		count = LOW_BATTERY_COUNT;

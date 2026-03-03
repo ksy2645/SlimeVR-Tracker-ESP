@@ -83,6 +83,8 @@ public:
 	void update();
 
 private:
+	void resetPatternState();
+
 	uint8_t m_CurrentCount = 0;
 	unsigned long m_Timer = 0;
 	LEDStage m_CurrentStage = OFF;

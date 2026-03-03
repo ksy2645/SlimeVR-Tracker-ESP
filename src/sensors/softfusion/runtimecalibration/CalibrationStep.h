@@ -53,6 +53,7 @@ public:
 	virtual void processGyroSample(const SensorRawT accelSample[3]) {}
 	virtual void processMagSample(const SensorRawT magSample[3]) {}
 	virtual void processTempSample(float tempSample) {}
+	virtual void setRestDetected(const bool rest) {}
 
 	bool restDetectionDelayElapsed() {
 		return (millis() - restDetectionDelayStartMillis)

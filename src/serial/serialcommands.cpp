@@ -28,6 +28,7 @@
 #include "GlobalVars.h"
 #include "base64.hpp"
 #include "batterymonitor.h"
+#include "calibration.h"
 #include "logging/Logger.h"
 #include "utils.h"
 
@@ -36,12 +37,12 @@
 #endif
 
 #ifdef EXT_SERIAL_COMMANDS
-#define CALLBACK_SIZE 7  // Increase callback size to allow for debug commands
+#define CALLBACK_SIZE 8  // Increase callback size to allow for debug commands
 #include "i2cscan.h"
 #endif
 
 #ifndef CALLBACK_SIZE
-#define CALLBACK_SIZE 6  // Default callback size
+#define CALLBACK_SIZE 7  // Default callback size
 #endif
 
 #if defined(VENDOR_URL) && defined(VENDOR_NAME) && defined(PRODUCT_NAME) \
@@ -479,6 +480,64 @@ void cmdDeleteCalibration(CmdParser* parser) {
 	configuration.eraseSensors();
 }
 
+void cmdCalibration(CmdParser* parser) {
+	if (parser->getParamCount() < 2) {
+		logger.info("Usage:");
+		logger.info("  CALIB ACCELFM [sensorId]");
+		logger.info("  CALIB ACCEL6 [sensorId]");
+		logger.info("  CALIB MAG [sensorId]");
+		return;
+	}
+
+	int calibrationType = -1;
+	if (parser->equalCmdParam(1, "ACCELFM")) {
+		calibrationType = CALIBRATION_TYPE_EXTERNAL_ACCEL_FULL_MATRIX;
+	} else if (parser->equalCmdParam(1, "ACCEL6")) {
+		calibrationType = CALIBRATION_TYPE_EXTERNAL_ACCEL;
+	} else if (parser->equalCmdParam(1, "MAG")) {
+		calibrationType = CALIBRATION_TYPE_EXTERNAL_MAG;
+	} else {
+		logger.error("CALIB ERROR: Unknown calibration mode");
+		logger.info("Supported modes: ACCELFM, ACCEL6, MAG");
+		return;
+	}
+
+	bool filterBySensorId = false;
+	uint8_t targetSensorId = 0;
+	if (parser->getParamCount() >= 3) {
+		const char* sensorIdText = parser->getCmdParam(2);
+		char* end = nullptr;
+		const long parsed = strtol(sensorIdText, &end, 10);
+		if (end == nullptr || *end != '\0' || parsed < 0 || parsed > 255) {
+			logger.error("CALIB ERROR: Invalid sensorId");
+			return;
+		}
+		targetSensorId = static_cast<uint8_t>(parsed);
+		filterBySensorId = true;
+	}
+
+	size_t requestedSensors = 0;
+	for (auto& sensor : sensorManager.getSensors()) {
+		if (filterBySensorId && sensor->getSensorId() != targetSensorId) {
+			continue;
+		}
+
+		sensor->startCalibration(calibrationType);
+		requestedSensors++;
+	}
+
+	if (requestedSensors == 0) {
+		logger.warn("CALIB: no matching sensors");
+		return;
+	}
+
+	logger.info(
+		"CALIB: requested mode %s on %u sensor(s)",
+		parser->getCmdParam(1),
+		static_cast<unsigned>(requestedSensors)
+	);
+}
+
 #if EXT_SERIAL_COMMANDS
 void cmdScanI2C(CmdParser* parser) {
 	logger.info("Forcing I2C scan...");
@@ -492,6 +551,7 @@ void setUp() {
 	cmdCallbacks.addCmd("FRST", &cmdFactoryReset);
 	cmdCallbacks.addCmd("REBOOT", &cmdReboot);
 	cmdCallbacks.addCmd("DELCAL", &cmdDeleteCalibration);
+	cmdCallbacks.addCmd("CALIB", &cmdCalibration);
 	cmdCallbacks.addCmd("TCAL", &cmdTemperatureCalibration);
 #if EXT_SERIAL_COMMANDS
 	cmdCallbacks.addCmd("SCANI2C", &cmdScanI2C);
