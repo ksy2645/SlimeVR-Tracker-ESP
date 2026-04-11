@@ -92,6 +92,7 @@ void Sensor::resetTemperatureCalibrationState() {
 };
 
 bool Sensor::clearMagCalibration() { return false; }
+bool Sensor::clearGyroCalibration() { return false; }
 
 const char* Sensor::getAttachedMagnetometer() const { return nullptr; }
 

@@ -110,6 +110,11 @@ struct RuntimeCalibrationSensorConfig {
 	bool accelFullMatrixCalibrated;
 	float A_B[3];
 	float A_Ainv[3][3];
+
+	// Legacy magneto1.4-based six-side accelerometer calibration
+	// Kept separate from A_sixSide* to allow side-by-side comparison.
+	float A_sixSideLegacyB[3];
+	float A_sixSideLegacyAinv[3][3];
 };
 
 struct MPU6050SensorConfig {

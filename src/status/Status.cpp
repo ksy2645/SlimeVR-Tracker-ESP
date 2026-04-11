@@ -15,8 +15,8 @@ const char* statusToString(Status status) {
 			return "SERVER_CONNECTING";
 		case MAG_CALIBRATING:
 			return "MAG_CALIBRATING";
-		case ACCEL_FULL_MATRIX_CALIBRATING:
-			return "ACCEL_FULL_MATRIX_CALIBRATING";
+		case ACCEL_CALIBRATING:
+			return "ACCEL_CALIBRATING";
 		default:
 			return "UNKNOWN";
 	}

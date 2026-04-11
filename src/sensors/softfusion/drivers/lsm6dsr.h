@@ -32,7 +32,7 @@
 namespace SlimeVR::Sensors::SoftFusion::Drivers {
 
 // Driver uses acceleration range at 4g
-// and gyroscope range at 2000dps
+// and gyroscope range at 1000dps
 // Gyroscope ODR = 208Hz, accel ODR = 104Hz
 
 struct LSM6DSR : LSM6DSOutputHandler {
@@ -58,7 +58,7 @@ struct LSM6DSR : LSM6DSOutputHandler {
 	static constexpr float MagTs = 1.0 / MagFreq;
 	static constexpr float TempTs = 1.0 / TempFreq;
 
-	static constexpr float GyroSensitivity = 1000 / 70.0f;
+	static constexpr float GyroSensitivity = 1000 / 35.0f;
 	static constexpr float AccelSensitivity = 1000 / 0.122f;
 
 	static constexpr float TemperatureBias = 25.0f;
@@ -79,7 +79,7 @@ struct LSM6DSR : LSM6DSOutputHandler {
 		};
 		struct Ctrl2GY {
 			static constexpr uint8_t reg = 0x11;
-			static constexpr uint8_t value = (0b01011100);  // GY at 208 Hz, 2000dps FS
+			static constexpr uint8_t value = (0b01011000);  // GY at 208 Hz, 1000dps FS
 		};
 		struct Ctrl3C {
 			static constexpr uint8_t reg = 0x12;

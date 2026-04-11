@@ -98,6 +98,7 @@ public:
 	virtual void provideTempSample(float tempSample) {}
 	virtual void onMagEnabled() {}
 	virtual bool clearMagCalibration() { return false; }
+	virtual bool clearGyroCalibration() { return false; }
 
 	virtual float getZROChange() { return IMU::TemperatureZROChange; };
 

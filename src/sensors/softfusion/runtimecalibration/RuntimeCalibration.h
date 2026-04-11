@@ -29,12 +29,36 @@
 #include <cmath>
 #include <cstdint>
 
+#define RC_ACCEL_MODE_DISABLED 0
+#define RC_ACCEL_MODE_LEGACY_MAGNETO_SIX_SIDE 1
+#define RC_ACCEL_MODE_SIX_SIDE 2
+#define RC_ACCEL_MODE_FULL_MATRIX 3
+
+// Select exactly one accel calibration mode by enum-like value.
+#ifndef RC_ACCEL_MODE
+#define RC_ACCEL_MODE RC_ACCEL_MODE_FULL_MATRIX
+#endif
+
+#if RC_ACCEL_MODE < RC_ACCEL_MODE_DISABLED || RC_ACCEL_MODE > RC_ACCEL_MODE_FULL_MATRIX
+#error "RC_ACCEL_MODE is out of valid range"
+#endif
+
+#define RC_ACCEL_MODE_IS_DISABLED (RC_ACCEL_MODE == RC_ACCEL_MODE_DISABLED)
+#define RC_ACCEL_MODE_IS_LEGACY_MAGNETO_SIX_SIDE \
+	(RC_ACCEL_MODE == RC_ACCEL_MODE_LEGACY_MAGNETO_SIX_SIDE)
+#define RC_ACCEL_MODE_IS_SIX_SIDE (RC_ACCEL_MODE == RC_ACCEL_MODE_SIX_SIDE)
+#define RC_ACCEL_MODE_IS_FULL_MATRIX (RC_ACCEL_MODE == RC_ACCEL_MODE_FULL_MATRIX)
+
 #include "../../../GlobalVars.h"
 #include "../../../calibration.h"
 #include "../../../configuration/Configuration.h"
 #include "AccelBiasCalibrationStep.h"
 #include "AccelFullMatrixCalibrationStep.h"
+#if RC_ACCEL_MODE_IS_LEGACY_MAGNETO_SIX_SIDE
+#include "AccelSixSideMagnetoCalibrationStep.h"
+#else
 #include "AccelSixSideCalibrationStep.h"
+#endif
 #include "GyroBiasCalibrationStep.h"
 #include "MagCalibrationStep.h"
 #include "MotionlessCalibrationStep.h"
@@ -50,6 +74,15 @@
 #endif
 
 namespace SlimeVR::Sensors::RuntimeCalibration {
+
+#if RC_ACCEL_MODE_IS_LEGACY_MAGNETO_SIX_SIDE
+template <typename SensorRawT>
+using SelectedAccelSixSideCalibrationStep
+	= AccelSixSideMagnetoCalibrationStep<SensorRawT>;
+#else
+template <typename SensorRawT>
+using SelectedAccelSixSideCalibrationStep = AccelSixSideCalibrationStep<SensorRawT>;
+#endif
 
 template <typename IMU>
 class RuntimeCalibrator : public Sensors::CalibrationBase<IMU> {
@@ -70,7 +103,7 @@ public:
 		SensorToggleState& toggles
 	)
 		: Base{fusion, imu, sensorId, logger, toggles}
-		, accelFullMatrixCalibrationStep{calibration, logger}
+		, accelFullMatrixCalibrationStep{calibration, logger, static_cast<float>(Consts::GScale)}
 		, accelSixSideCalibrationStep{calibration, logger, static_cast<float>(Consts::AScale)}
 		, magCalibrationStep{calibration, logger} {
 		calibration.T_Ts = Consts::getDefaultTempTs();
@@ -103,13 +136,17 @@ public:
 				activeCalibration.A_off[i] = 0;
 				activeCalibration.A_sixSideOff[i] = 0;
 				activeCalibration.A_sixSideScale[i] = 1.0f;
+				activeCalibration.A_sixSideLegacyB[i] = 0.0f;
 				activeCalibration.A_B[i] = 0.0f;
 				for (size_t j = 0; j < 3; j++) {
 					activeCalibration.A_Ainv[i][j] = (i == j) ? 1.0f : 0.0f;
+					activeCalibration.A_sixSideLegacyAinv[i][j]
+						= (i == j) ? 1.0f : 0.0f;
 				}
 			}
 			activeCalibration.accelFullMatrixCalibrated = false;
 			activeAccelFullMatrixValid = false;
+			activeAccelSixSideValid = false;
 			pendingMagCalibrationRequest = false;
 		} else {
 			calculateZROChange();
@@ -124,6 +161,11 @@ public:
 			syncAccelFullMatrixCalibrationToActive();
 
 			if (isAccelSixSideCalibrationMissing(calibration)) {
+				resetAccelSixSideCalibration(calibration);
+			} else if (!isAccelSixSideCalibrationValid(calibration)) {
+				logger.warn(
+					"Invalid accel six-side calibration data found, clearing it"
+				);
 				resetAccelSixSideCalibration(calibration);
 			}
 			syncAccelSixSideCalibrationToActive();
@@ -167,7 +209,12 @@ public:
 		printCalibration();
 	}
 
-	void checkStartupCalibration() final { initializeStartupAccelSixSideTrigger(); }
+	void checkStartupCalibration() final {
+#if RC_ACCEL_MODE_IS_FULL_MATRIX || RC_ACCEL_MODE_IS_SIX_SIDE \
+	|| RC_ACCEL_MODE_IS_LEGACY_MAGNETO_SIX_SIDE
+		initializeStartupAccelSixSideTrigger();
+#endif
+	}
 
 	void startCalibration(int calibrationType) final {
 		if (!isCalibrationRequestEnabled()) {
@@ -247,8 +294,8 @@ public:
 			rawAccelMs2[i] = accelSample[i] * Consts::AScale;
 		}
 
-		const bool useAccelFullMatrix = activeAccelFullMatrixValid;
-		if (useAccelFullMatrix) {
+#if RC_ACCEL_MODE_IS_FULL_MATRIX
+		if (activeAccelFullMatrixValid) {
 			float tmp[3];
 			tmp[0] = rawAccelCounts[0] - activeCalibration.A_B[0];
 			tmp[1] = rawAccelCounts[1] - activeCalibration.A_B[1];
@@ -268,14 +315,54 @@ public:
 						   * Consts::AScale;
 		} else {
 			for (size_t i = 0; i < 3; i++) {
+				accelSample[i] = rawAccelMs2[i];
+			}
+		}
+#elif RC_ACCEL_MODE_IS_LEGACY_MAGNETO_SIX_SIDE
+		if (activeAccelSixSideValid) {
+			float tmp[3];
+			tmp[0] = rawAccelCounts[0] - activeCalibration.A_sixSideLegacyB[0];
+			tmp[1] = rawAccelCounts[1] - activeCalibration.A_sixSideLegacyB[1];
+			tmp[2] = rawAccelCounts[2] - activeCalibration.A_sixSideLegacyB[2];
+
+			accelSample[0] = (activeCalibration.A_sixSideLegacyAinv[0][0] * tmp[0]
+							  + activeCalibration.A_sixSideLegacyAinv[0][1] * tmp[1]
+							  + activeCalibration.A_sixSideLegacyAinv[0][2] * tmp[2])
+						   * Consts::AScale;
+			accelSample[1] = (activeCalibration.A_sixSideLegacyAinv[1][0] * tmp[0]
+							  + activeCalibration.A_sixSideLegacyAinv[1][1] * tmp[1]
+							  + activeCalibration.A_sixSideLegacyAinv[1][2] * tmp[2])
+						   * Consts::AScale;
+			accelSample[2] = (activeCalibration.A_sixSideLegacyAinv[2][0] * tmp[0]
+							  + activeCalibration.A_sixSideLegacyAinv[2][1] * tmp[1]
+							  + activeCalibration.A_sixSideLegacyAinv[2][2] * tmp[2])
+						   * Consts::AScale;
+		} else {
+			for (size_t i = 0; i < 3; i++) {
+				accelSample[i] = rawAccelMs2[i];
+			}
+		}
+#elif RC_ACCEL_MODE_IS_SIX_SIDE
+		if (activeAccelSixSideValid) {
+			for (size_t i = 0; i < 3; i++) {
 				accelSample[i] = rawAccelMs2[i] * activeCalibration.A_sixSideScale[i]
 							   - activeCalibration.A_sixSideOff[i];
 			}
+		} else {
+			for (size_t i = 0; i < 3; i++) {
+				accelSample[i] = rawAccelMs2[i];
+			}
 		}
+#else
+		for (size_t i = 0; i < 3; i++) {
+			accelSample[i] = rawAccelMs2[i];
+		}
+#endif
 
 #if RUNTIME_CALIBRATION_ENABLE_RUNTIME_ACCEL_DEBUG_LOGS
 		const bool restDetected = fusion.getRestDetected();
-		if (useAccelFullMatrix) {
+#if RC_ACCEL_MODE_IS_FULL_MATRIX
+		if (activeAccelFullMatrixValid) {
 			captureAccelDebugSnapshot(
 				accelFullMatrixRestSnapshot,
 				rawAccelCounts,
@@ -294,6 +381,16 @@ public:
 			);
 			maybeLogAccelSixSideDebug();
 		}
+#else
+		captureAccelDebugSnapshot(
+			accelSixSideRestSnapshot,
+			rawAccelCounts,
+			rawAccelMs2,
+			accelSample,
+			restDetected
+		);
+		maybeLogAccelSixSideDebug();
+#endif
 #endif
 	}
 
@@ -427,6 +524,32 @@ public:
 
 	float getZROChange() final { return activeZROChange; }
 
+	bool clearGyroCalibration() final {
+		calibration.gyroPointsCalibrated = 0;
+		calibration.gyroMeasurementTemperature1 = 0.0f;
+		calibration.gyroMeasurementTemperature2 = 0.0f;
+		activeCalibration.gyroPointsCalibrated = 0;
+		activeCalibration.gyroMeasurementTemperature1 = 0.0f;
+		activeCalibration.gyroMeasurementTemperature2 = 0.0f;
+		for (size_t i = 0; i < 3; i++) {
+			calibration.G_off1[i] = 0.0f;
+			calibration.G_off2[i] = 0.0f;
+			activeCalibration.G_off1[i] = 0.0f;
+			activeCalibration.G_off2[i] = 0.0f;
+		}
+		activeZROChange = IMU::TemperatureZROChange;
+
+		if (nextCalibrationStep == CalibrationStepEnum::GYRO_BIAS) {
+			currentStep->cancel();
+			computeNextCalibrationStep();
+			isCalibrating = false;
+		}
+
+		saveCalibration();
+		logger.info("Gyro calibration cleared");
+		return true;
+	}
+
 	bool clearMagCalibration() final {
 		resetMagCalibration(calibration);
 		syncMagCalibrationToActive();
@@ -461,15 +584,13 @@ private:
 	static constexpr float maxValidMagReferenceNorm = 100000.0f;
 	static constexpr float magNormRejectRelativeThreshold = 0.07f;
 	static constexpr float magNormRejectAbsoluteThreshold = 20.0f;
-	static constexpr uint8_t startupAccelSixSideWindowSeconds = 2;
+	static constexpr uint8_t startupAccelSixSideWindowSeconds = 3;
 	static constexpr float startupAccelSixSideMinAbsGravityZ = 0.75f;
-	static constexpr uint16_t startupAccelSixSideBootZGateMinSettlingMs = 250;
-	static constexpr uint8_t startupAccelSixSideBootZGateSampleCount = 12;
+	static constexpr uint16_t startupAccelSixSideReadyLedPulseMs = 800;
+	static constexpr uint16_t startupAccelSixSideReadyLedOnMs = 400;
+	static constexpr uint16_t startupAccelSixSideBootZCollectionMs = 800;
 
-	void resetStartupAccelSixSideBootGateSampling() {
-		startupAccelSixSideBootZAccum = 0.0f;
-		startupAccelSixSideBootZSamples = 0;
-	}
+	void resetStartupAccelSixSideBootGateSampling() { startupAccelSixSideBootZ = 0.0f; }
 
 	void clearPendingAccelCalibrationRequests() {
 		pendingAccelFullMatrixCalibrationRequest = false;
@@ -478,6 +599,9 @@ private:
 
 	void initializeStartupAccelSixSideTrigger() {
 		startupAccelSixSideWindowStartMillis = millis();
+		startupAccelSixSideReadyLastLedMs = startupAccelSixSideWindowStartMillis;
+		startupAccelSixSideReadyLedPulseEndMillis = 0;
+		startupAccelSixSideReadyLedPulseActive = false;
 		clearPendingAccelCalibrationRequests();
 		startupAccelSixSideMonitoringEnabled = false;
 		startupAccelSixSideBootZGatePending
@@ -599,6 +723,13 @@ private:
 				}
 				break;
 			case CalibrationStepEnum::ACCEL_SIX_SIDE:
+				if (!isAccelSixSideCalibrationMissing(calibration)
+					&& !isAccelSixSideCalibrationValid(calibration)) {
+					logger.warn(
+						"Accel six-side calibration output was invalid, resetting it"
+					);
+					resetAccelSixSideCalibration(calibration);
+				}
 				// sync
 				syncAccelSixSideCalibrationToActive();
 				computeNextCalibrationStep();
@@ -696,6 +827,11 @@ private:
 	}
 
 	void maybeStartAccelFullMatrixCalibration() {
+#if !RC_ACCEL_MODE_IS_FULL_MATRIX
+		pendingAccelFullMatrixCalibrationRequest = false;
+		return;
+#endif
+
 		if (!pendingAccelFullMatrixCalibrationRequest) {
 			return;
 		}
@@ -713,6 +849,11 @@ private:
 	}
 
 	void maybeStartAccelSixSideCalibration() {
+#if !(RC_ACCEL_MODE_IS_SIX_SIDE || RC_ACCEL_MODE_IS_LEGACY_MAGNETO_SIX_SIDE)
+		pendingAccelSixSideCalibrationRequest = false;
+		return;
+#endif
+
 		if (!pendingAccelSixSideCalibrationRequest) {
 			return;
 		}
@@ -731,7 +872,11 @@ private:
 		currentStep = &accelSixSideCalibrationStep;
 		pendingAccelSixSideCalibrationRequest = false;
 		disableStartupAccelSixSideTrigger();
+#if RC_ACCEL_MODE_IS_LEGACY_MAGNETO_SIX_SIDE
+		logger.info("Starting accel six-side calibration (legacy magneto1.4)");
+#else
 		logger.info("Starting accel six-side calibration");
+#endif
 	}
 
 	void updateStartupAccelSixSideTrigger() {
@@ -759,39 +904,26 @@ private:
 		}
 
 		if (startupAccelSixSideBootZGatePending) {
-			if (elapsed < startupAccelSixSideBootZGateMinSettlingMs) {
+			if (elapsed < startupAccelSixSideBootZCollectionMs) {
 				return;
 			}
 
-			startupAccelSixSideBootZAccum += gravityZ;
-			startupAccelSixSideBootZSamples++;
-
-			const uint64_t windowMillis = startupAccelSixSideWindowSeconds * 1e3;
-			const bool shouldForceDecisionNearTimeout = elapsed + 50 >= windowMillis;
-			const bool hasEnoughBootZSamples = startupAccelSixSideBootZSamples
-											>= startupAccelSixSideBootZGateSampleCount;
-			if (!hasEnoughBootZSamples && !shouldForceDecisionNearTimeout) {
-				return;
-			}
+			startupAccelSixSideBootZ = gravityZ;
 
 			startupAccelSixSideBootZGatePending = false;
-			const float bootAvgZ = startupAccelSixSideBootZAccum
-								 / static_cast<float>(startupAccelSixSideBootZSamples);
-			if (bootAvgZ <= -startupAccelSixSideMinAbsGravityZ) {
+			if (startupAccelSixSideBootZ <= -startupAccelSixSideMinAbsGravityZ) {
 				startupAccelSixSideMonitoringEnabled = true;
 				logger.info(
 					"Startup six-side trigger enabled (boot negative Z detected, "
-					"avgZ=%.3f, n=%u)",
-					bootAvgZ,
-					static_cast<unsigned>(startupAccelSixSideBootZSamples)
+					"Z=%.3f)",
+					startupAccelSixSideBootZ
 				);
 			} else {
 				startupAccelSixSideMonitoringEnabled = false;
 				logger.info(
 					"Startup six-side trigger skipped (boot Z was not negative, "
-					"avgZ=%.3f, n=%u)",
-					bootAvgZ,
-					static_cast<unsigned>(startupAccelSixSideBootZSamples)
+					"Z=%.3f)",
+					startupAccelSixSideBootZ
 				);
 			}
 			return;
@@ -801,17 +933,48 @@ private:
 			return;
 		}
 
+		const uint64_t now = millis();
+		if (startupAccelSixSideReadyLedPulseActive) {
+			if (now >= startupAccelSixSideReadyLedPulseEndMillis) {
+				ledManager.off();
+				startupAccelSixSideReadyLedPulseActive = false;
+			}
+		} else {
+			const uint64_t ledElapsed = now - startupAccelSixSideReadyLastLedMs;
+			if (ledElapsed >= startupAccelSixSideReadyLedPulseMs) {
+				startupAccelSixSideReadyLastLedMs = now;
+				startupAccelSixSideReadyLedPulseEndMillis
+					= now + startupAccelSixSideReadyLedOnMs;
+				startupAccelSixSideReadyLedPulseActive = true;
+				ledManager.on();
+			}
+		}
+		// logger.info("gravityZ: %f", gravityZ);
+
 		if (gravityZ >= startupAccelSixSideMinAbsGravityZ) {
+#if RC_ACCEL_MODE_IS_FULL_MATRIX
+			pendingAccelFullMatrixCalibrationRequest = true;
+			disableStartupAccelSixSideTrigger();
+			logger.info(
+				"Startup flip detected (positive Z), scheduling accel full-matrix "
+				"calibration"
+			);
+#else
 			pendingAccelSixSideCalibrationRequest = true;
 			disableStartupAccelSixSideTrigger();
 			logger.info(
 				"Startup flip detected (positive Z), scheduling accel six-side "
 				"calibration"
 			);
+#endif
 		}
 	}
 
 	void disableStartupAccelSixSideTrigger() {
+		startupAccelSixSideReadyLedPulseActive = false;
+		startupAccelSixSideReadyLedPulseEndMillis = 0;
+		startupAccelSixSideReadyLastLedMs = millis();
+		ledManager.off();
 		startupAccelSixSideBootZGatePending = false;
 		startupAccelSixSideMonitoringEnabled = false;
 		resetStartupAccelSixSideBootGateSampling();
@@ -819,9 +982,20 @@ private:
 
 	void syncAccelSixSideCalibrationToActive() {
 		for (uint8_t i = 0; i < 3; i++) {
+#if RC_ACCEL_MODE_IS_LEGACY_MAGNETO_SIX_SIDE
+			activeCalibration.A_sixSideLegacyB[i] = calibration.A_sixSideLegacyB[i];
+			for (uint8_t j = 0; j < 3; j++) {
+				activeCalibration.A_sixSideLegacyAinv[i][j]
+					= calibration.A_sixSideLegacyAinv[i][j];
+			}
+#else
 			activeCalibration.A_sixSideOff[i] = calibration.A_sixSideOff[i];
 			activeCalibration.A_sixSideScale[i] = calibration.A_sixSideScale[i];
+#endif
 		}
+		activeAccelSixSideValid = toggles.getToggle(SensorToggles::CalibrationEnabled)
+							   && !isAccelSixSideCalibrationMissing(activeCalibration)
+							   && isAccelSixSideCalibrationValid(activeCalibration);
 	}
 
 	void syncAccelFullMatrixCalibrationToActive() {
@@ -899,6 +1073,28 @@ private:
 		const Configuration::RuntimeCalibrationSensorConfig& config
 	) const {
 		constexpr float epsilon = 1e-6f;
+#if RC_ACCEL_MODE_IS_LEGACY_MAGNETO_SIX_SIDE
+		bool offsetsAreZero = true;
+		for (uint8_t i = 0; i < 3; i++) {
+			if (std::abs(config.A_sixSideLegacyB[i]) > epsilon) {
+				offsetsAreZero = false;
+				break;
+			}
+		}
+
+		bool matrixIsIdentity = true;
+		for (uint8_t i = 0; i < 3; i++) {
+			for (uint8_t j = 0; j < 3; j++) {
+				const float expected = i == j ? 1.0f : 0.0f;
+				if (std::abs(config.A_sixSideLegacyAinv[i][j] - expected) > epsilon) {
+					matrixIsIdentity = false;
+					break;
+				}
+			}
+		}
+
+		return offsetsAreZero && matrixIsIdentity;
+#else
 		for (uint8_t i = 0; i < 3; i++) {
 			if (std::abs(config.A_sixSideOff[i]) > epsilon
 				|| std::abs(config.A_sixSideScale[i] - 1.0f) > epsilon) {
@@ -906,14 +1102,75 @@ private:
 			}
 		}
 		return true;
+#endif
+	}
+
+	bool isAccelSixSideCalibrationValid(
+		const Configuration::RuntimeCalibrationSensorConfig& config
+	) const {
+#if RC_ACCEL_MODE_IS_LEGACY_MAGNETO_SIX_SIDE
+		float diagonalAbs[3]{0.0f, 0.0f, 0.0f};
+		for (uint8_t i = 0; i < 3; i++) {
+			if (!std::isfinite(config.A_sixSideLegacyB[i])) {
+				return false;
+			}
+			for (uint8_t j = 0; j < 3; j++) {
+				const float value = config.A_sixSideLegacyAinv[i][j];
+				if (!std::isfinite(value) || std::abs(value) > 20.0f) {
+					return false;
+				}
+			}
+			diagonalAbs[i] = std::abs(config.A_sixSideLegacyAinv[i][i]);
+		}
+
+		const float meanDiagonal
+			= (diagonalAbs[0] + diagonalAbs[1] + diagonalAbs[2]) / 3.0f;
+		if (!std::isfinite(meanDiagonal) || meanDiagonal < 1e-4f
+			|| meanDiagonal > 10.0f) {
+			return false;
+		}
+
+		const float diagonalTolerance = std::max(meanDiagonal * 0.6f, 0.05f);
+		for (uint8_t i = 0; i < 3; i++) {
+			if (std::abs(diagonalAbs[i] - meanDiagonal) > diagonalTolerance) {
+				return false;
+			}
+		}
+
+		return true;
+#elif RC_ACCEL_MODE_IS_SIX_SIDE
+		for (uint8_t i = 0; i < 3; i++) {
+			const float scale = config.A_sixSideScale[i];
+			const float offset = config.A_sixSideOff[i];
+			if (!std::isfinite(scale) || !std::isfinite(offset)) {
+				return false;
+			}
+			if (std::abs(scale) < 1e-4f || std::abs(scale) > 10.0f) {
+				return false;
+			}
+			if (std::abs(offset) > 200.0f) {
+				return false;
+			}
+		}
+		return true;
+#else
+		return true;
+#endif
 	}
 
 	static void resetAccelSixSideCalibration(
 		Configuration::RuntimeCalibrationSensorConfig& calibration
 	) {
 		for (uint8_t i = 0; i < 3; i++) {
+#if RC_ACCEL_MODE_IS_LEGACY_MAGNETO_SIX_SIDE
+			calibration.A_sixSideLegacyB[i] = 0.0f;
+			for (uint8_t j = 0; j < 3; j++) {
+				calibration.A_sixSideLegacyAinv[i][j] = (i == j) ? 1.0f : 0.0f;
+			}
+#else
 			calibration.A_sixSideOff[i] = 0.0f;
 			calibration.A_sixSideScale[i] = 1.0f;
+#endif
 		}
 	}
 
@@ -1298,6 +1555,23 @@ private:
 			if (isAccelSixSideCalibrationMissing(calibration)) {
 				logger.info("Accel six-side not calibrated");
 			} else {
+#if RC_ACCEL_MODE_IS_LEGACY_MAGNETO_SIX_SIDE
+				logger.info(
+					"Accel six-side (legacy magneto) B: %f %f %f",
+					calibration.A_sixSideLegacyB[0],
+					calibration.A_sixSideLegacyB[1],
+					calibration.A_sixSideLegacyB[2]
+				);
+				logger.info("Accel six-side (legacy magneto) Ainv:");
+				for (uint8_t i = 0; i < 3; i++) {
+					logger.info(
+						"  %f %f %f",
+						calibration.A_sixSideLegacyAinv[i][0],
+						calibration.A_sixSideLegacyAinv[i][1],
+						calibration.A_sixSideLegacyAinv[i][2]
+					);
+				}
+#else
 				logger.info(
 					"Accel six-side scale: %f %f %f",
 					calibration.A_sixSideScale[0],
@@ -1310,6 +1584,7 @@ private:
 					calibration.A_sixSideOff[1],
 					calibration.A_sixSideOff[2]
 				);
+#endif
 			}
 
 			if (isAccelFullMatrixCalibrationValid(calibration)) {
@@ -1373,7 +1648,7 @@ private:
 		static_cast<float>(Consts::AScale)
 	};
 	AccelFullMatrixCalibrationStep<RawSensorT> accelFullMatrixCalibrationStep;
-	AccelSixSideCalibrationStep<RawSensorT> accelSixSideCalibrationStep;
+	SelectedAccelSixSideCalibrationStep<RawSensorT> accelSixSideCalibrationStep;
 	MagCalibrationStep<RawSensorT> magCalibrationStep;
 	NullCalibrationStep<RawSensorT> nullCalibrationStep{calibration};
 
@@ -1386,11 +1661,13 @@ private:
 	bool magCalibrationAttemptedSinceBoot = false;
 	bool startupAccelSixSideBootZGatePending = false;
 	bool startupAccelSixSideMonitoringEnabled = false;
-	float startupAccelSixSideBootZAccum = 0.0f;
-	uint16_t startupAccelSixSideBootZSamples = 0;
+	float startupAccelSixSideBootZ = 0.0f;
 	bool pendingAccelFullMatrixCalibrationRequest = false;
 	bool pendingAccelSixSideCalibrationRequest = false;
 	uint64_t startupAccelSixSideWindowStartMillis = 0;
+	uint64_t startupAccelSixSideReadyLastLedMs = 0;
+	uint64_t startupAccelSixSideReadyLedPulseEndMillis = 0;
+	bool startupAccelSixSideReadyLedPulseActive = false;
 #if RUNTIME_CALIBRATION_ENABLE_RUNTIME_ACCEL_DEBUG_LOGS
 	static constexpr uint32_t accelSixSideDebugLogIntervalMs = 3000;
 	uint64_t lastAccelSixSideDebugLogMillis = 0;
@@ -1432,13 +1709,17 @@ private:
 
 		.accelFullMatrixCalibrated = false,
 		.A_B = {0.0, 0.0, 0.0},
-		.A_Ainv = {{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}}
+		.A_Ainv = {{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}},
+
+		.A_sixSideLegacyB = {0.0, 0.0, 0.0},
+		.A_sixSideLegacyAinv = {{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}}
 	};
 
 	float activeZROChange = 0;
 
 	Configuration::RuntimeCalibrationSensorConfig activeCalibration = calibration;
 	bool activeAccelFullMatrixValid = false;
+	bool activeAccelSixSideValid = false;
 
 	using Base::fusion;
 	using Base::logger;

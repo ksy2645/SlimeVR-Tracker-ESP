@@ -435,6 +435,12 @@ public:
 	}
 
 	bool clearMagCalibration() final { return calibrator.clearMagCalibration(); }
+	bool clearGyroCalibration() final {
+		if constexpr (requires(Calib& c) { c.clearGyroCalibration(); }) {
+			return calibrator.clearGyroCalibration();
+		}
+		return false;
+	}
 
 	[[nodiscard]] bool isFlagSupported(SensorToggles toggle) const final {
 		return toggle == SensorToggles::CalibrationEnabled

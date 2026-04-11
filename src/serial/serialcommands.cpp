@@ -448,7 +448,26 @@ void cmdTemperatureCalibration(CmdParser* parser) {
 
 void cmdDeleteCalibration(CmdParser* parser) {
 	if (parser->getParamCount() > 1) {
-		if (parser->equalCmdParam(1, "MAG")) {
+		if (parser->equalCmdParam(1, "GYRO")) {
+			size_t clearedSensors = 0;
+			for (auto& sensor : sensorManager.getSensors()) {
+				if (sensor->clearGyroCalibration()) {
+					clearedSensors++;
+				}
+			}
+
+			if (clearedSensors > 0) {
+				logger.info(
+					"DELCAL GYRO: cleared gyroscope calibration on %u sensor(s)",
+					static_cast<unsigned>(clearedSensors)
+				);
+			} else {
+				logger.warn(
+					"DELCAL GYRO: no sensor supports gyroscope calibration erase"
+				);
+			}
+			return;
+		} else if (parser->equalCmdParam(1, "MAG")) {
 			size_t clearedSensors = 0;
 			for (auto& sensor : sensorManager.getSensors()) {
 				if (sensor->clearMagCalibration()) {
@@ -471,6 +490,7 @@ void cmdDeleteCalibration(CmdParser* parser) {
 
 		logger.info("Usage:");
 		logger.info("  DELCAL: erase all calibration");
+		logger.info("  DELCAL GYRO: erase gyroscope calibration only");
 		logger.info("  DELCAL MAG: erase magnetometer calibration only");
 		return;
 	}

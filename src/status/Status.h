@@ -9,7 +9,7 @@ enum Status {
 	WIFI_CONNECTING = 1 << 3,
 	SERVER_CONNECTING = 1 << 4,
 	MAG_CALIBRATING = 1 << 5,
-	ACCEL_FULL_MATRIX_CALIBRATING = 1 << 6
+	ACCEL_CALIBRATING = 1 << 6
 };
 
 const char* statusToString(Status status);

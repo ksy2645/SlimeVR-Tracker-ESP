@@ -82,8 +82,11 @@ void LEDManager::update() {
 	unsigned int length = 0;
 	unsigned int count = 0;
 
-	if (statusManager.hasStatus(Status::ACCEL_FULL_MATRIX_CALIBRATING)) {
-		resetPatternState();
+	if (statusManager.hasStatus(Status::ACCEL_CALIBRATING)) {
+		// For directly controls LED output.
+		m_CurrentStage = OFF;
+		m_CurrentCount = 0;
+		m_Timer = 0;
 		return;
 	}
 

@@ -51,26 +51,32 @@ public:
 	struct CalibrationOutput {
 		float A_B[3];
 		float A_Ainv[3][3];
-		float referenceNormRaw;
+		float referenceAccelNormRaw;
 		size_t sampleCount;
 	};
 
 	AccelFullMatrixCalibrationStep(
 		SlimeVR::Configuration::RuntimeCalibrationSensorConfig& sensorConfig,
-		SlimeVR::Logging::Logger& logger
+		SlimeVR::Logging::Logger& logger,
+		float gyroScaleRadPerSecPerRaw
 	)
 		: CalibrationStep<SensorRawT>{sensorConfig}
-		, logger{logger} {}
+		, logger{logger}
+		, maxReferenceCaptureGyroNormRaw{convertGyroNormDpsToRawThreshold(
+			  gyroScaleRadPerSecPerRaw,
+			  maxReferenceCaptureGyroNormDps
+		  )}
+		, maxSampleCollectionHoldStillGyroNormRaw{convertGyroNormDpsToRawThreshold(
+			  gyroScaleRadPerSecPerRaw,
+			  maxSampleCollectionHoldStillGyroNormDps
+		  )} {}
 
 	void start() override final {
 		CalibrationStep<SensorRawT>::start();
 		calibrationData = CalibrationData{};
 		calibrationData.value().startMillis = millis();
 		calibrationData.value().stage = Stage::CAPTURE_REFERENCE;
-		statusManager.setStatus(
-			SlimeVR::Status::ACCEL_FULL_MATRIX_CALIBRATING,
-			true
-		);
+		statusManager.setStatus(SlimeVR::Status::ACCEL_CALIBRATING, true);
 		latestCalibration.reset();
 		sampleLedPulseActive = false;
 		hasRecentGyroSample = false;
@@ -107,10 +113,7 @@ public:
 				static_cast<unsigned>(data.poseGroupCounts[5])
 			);
 			sampleLedPulseActive = false;
-			statusManager.setStatus(
-				SlimeVR::Status::ACCEL_FULL_MATRIX_CALIBRATING,
-				false
-			);
+			statusManager.setStatus(SlimeVR::Status::ACCEL_CALIBRATING, false);
 			ledManager.off();
 			return TickResult::SKIP;
 		}
@@ -120,16 +123,13 @@ public:
 				return TickResult::CONTINUE;
 			}
 
-			data.referenceNormRaw = data.referenceNormRawAccum
-								  / static_cast<float>(data.referenceSampleCount);
-			if (!std::isfinite(data.referenceNormRaw)
-				|| data.referenceNormRaw < minReferenceNormRaw) {
+			data.referenceAccelNormRaw = data.referenceAccelNormRawAccum
+									   / static_cast<float>(data.referenceSampleCount);
+			if (!std::isfinite(data.referenceAccelNormRaw)
+				|| data.referenceAccelNormRaw < minReferenceAccelNormRaw) {
 				logger.warn("Accel full-matrix reference norm capture failed");
 				sampleLedPulseActive = false;
-				statusManager.setStatus(
-					SlimeVR::Status::ACCEL_FULL_MATRIX_CALIBRATING,
-					false
-				);
+				statusManager.setStatus(SlimeVR::Status::ACCEL_CALIBRATING, false);
 				ledManager.off();
 				return TickResult::SKIP;
 			}
@@ -140,7 +140,7 @@ public:
 			data.poseSampleCount = 0;
 			data.poseSamplesCommitted = false;
 			data.holdDirection.reset();
-			data.holdNormRaw = 0.0f;
+			data.holdAccelNormRaw = 0.0f;
 			data.holdStartMillis = 0;
 			// Phase switch feedback
 			ledManager.pattern(60, 60, 2);
@@ -148,9 +148,9 @@ public:
 			logger.info(
 				"Accel full-matrix reference norm ready: %.2f raw (tolerance +/- %.2f, "
 				"%u samples per pose)",
-				data.referenceNormRaw,
+				data.referenceAccelNormRaw,
 				std::max(
-					data.referenceNormRaw * sampleNormToleranceRatio,
+					data.referenceAccelNormRaw * sampleNormToleranceRatio,
 					sampleNormToleranceRawMin
 				),
 				static_cast<unsigned>(samplesPerPose)
@@ -222,10 +222,7 @@ public:
 		if (!isCalibrationMatrixSane(A_BAinv)) {
 			logger.warn("Accel full-matrix matrix sanity check failed");
 			sampleLedPulseActive = false;
-			statusManager.setStatus(
-				SlimeVR::Status::ACCEL_FULL_MATRIX_CALIBRATING,
-				false
-			);
+			statusManager.setStatus(SlimeVR::Status::ACCEL_CALIBRATING, false);
 			ledManager.off();
 			return TickResult::SKIP;
 		}
@@ -233,10 +230,7 @@ public:
 		if (!isCalibrationQualityValid(A_BAinv)) {
 			logger.warn("Accel full-matrix quality check failed");
 			sampleLedPulseActive = false;
-			statusManager.setStatus(
-				SlimeVR::Status::ACCEL_FULL_MATRIX_CALIBRATING,
-				false
-			);
+			statusManager.setStatus(SlimeVR::Status::ACCEL_CALIBRATING, false);
 			ledManager.off();
 			return TickResult::SKIP;
 		}
@@ -248,7 +242,7 @@ public:
 			out.A_Ainv[1][i] = A_BAinv[2][i];
 			out.A_Ainv[2][i] = A_BAinv[3][i];
 		}
-		out.referenceNormRaw = data.referenceNormRaw;
+		out.referenceAccelNormRaw = data.referenceAccelNormRaw;
 		out.sampleCount = data.storedSampleCount;
 		latestCalibration = out;
 		data.stage = Stage::COMPLETE;
@@ -256,7 +250,7 @@ public:
 		logger.info(
 			"Accel full-matrix calibration completed (%u samples, reference norm %.2f)",
 			static_cast<unsigned>(out.sampleCount),
-			out.referenceNormRaw
+			out.referenceAccelNormRaw
 		);
 		logger.info(
 			"Accel calibration A_B: %f %f %f",
@@ -270,10 +264,7 @@ public:
 		logger.info("  %f %f %f", out.A_Ainv[2][0], out.A_Ainv[2][1], out.A_Ainv[2][2]);
 
 		sampleLedPulseActive = false;
-		statusManager.setStatus(
-			SlimeVR::Status::ACCEL_FULL_MATRIX_CALIBRATING,
-			false
-		);
+		statusManager.setStatus(SlimeVR::Status::ACCEL_CALIBRATING, false);
 		ledManager.off();
 		return TickResult::DONE;
 	}
@@ -281,10 +272,7 @@ public:
 	void cancel() override final {
 		calibrationData.reset();
 		sampleLedPulseActive = false;
-		statusManager.setStatus(
-			SlimeVR::Status::ACCEL_FULL_MATRIX_CALIBRATING,
-			false
-		);
+		statusManager.setStatus(SlimeVR::Status::ACCEL_CALIBRATING, false);
 		ledManager.off();
 	}
 
@@ -296,21 +284,21 @@ public:
 		const float gx = static_cast<float>(gyroSample[0]);
 		const float gy = static_cast<float>(gyroSample[1]);
 		const float gz = static_cast<float>(gyroSample[2]);
-		const float normRaw = std::sqrt(gx * gx + gy * gy + gz * gz);
-		if (!std::isfinite(normRaw)) {
+		const float gyroNormRaw = std::sqrt(gx * gx + gy * gy + gz * gz);
+		if (!std::isfinite(gyroNormRaw)) {
 			return;
 		}
 
 		const uint32_t now = millis();
 		lastGyroSampleMillis = now;
 		if (!hasRecentGyroSample) {
-			gyroNormRawEma = normRaw;
+			gyroNormRawEma = gyroNormRaw;
 			hasRecentGyroSample = true;
 			return;
 		}
 
 		gyroNormRawEma
-			= gyroEmaAlpha * normRaw + (1.0f - gyroEmaAlpha) * gyroNormRawEma;
+			= gyroEmaAlpha * gyroNormRaw + (1.0f - gyroEmaAlpha) * gyroNormRawEma;
 	}
 
 	void processAccelSample(const SensorRawT accelSample[3]) override final {
@@ -326,8 +314,8 @@ public:
 				return;
 			}
 
-			const float normRaw = accelNormRaw(accelSample);
-			data.referenceNormRawAccum += normRaw;
+			const float accelNormRawValue = accelNormRaw(accelSample);
+			data.referenceAccelNormRawAccum += accelNormRawValue;
 			data.referenceSampleCount++;
 			return;
 		}
@@ -379,32 +367,35 @@ private:
 		COUNT,
 	};
 
-	static constexpr size_t rejectReasonCount
-		= static_cast<size_t>(RejectReason::COUNT);
-
 	static constexpr size_t referenceSampleCount = 120;
 	static constexpr size_t calibrationWindowSampleCount = 240;
 	static constexpr size_t minCalibrationSampleCount = 80;
 	static constexpr uint16_t maxCalibrationTimeSeconds = 420;
-	static constexpr float minReferenceNormRaw = 100.0f;
+	static constexpr float minReferenceAccelNormRaw = 100.0f;
 	static constexpr uint8_t samplesPerPose = 9;
-	static constexpr float minSamePoseDirectionDot = 0.9945219f;  // cos(6 deg)
-	static constexpr float maxNextPoseDirectionDot = 0.9396926f;  // cos(20 deg)
-	// ~313 raw tolerance when referenceNormRaw is around 8245
+	static constexpr float minSamePoseDirectionDot
+		= std::cos(6 * PI / 180);  // 0.9945219f;  // cos(6 deg)
+	static constexpr float maxNextPoseDirectionDot
+		= std::cos(20 * PI / 180);  // 0.9396926f;  // cos(20 deg)
+	// ~313 raw tolerance when referenceAccelNormRaw is around 8245
 	static constexpr float sampleNormToleranceRatio = 0.038f;
 	static constexpr float sampleNormToleranceRawMin = 60.0f;
 	static constexpr bool allowGyroStillReferenceWithoutRest = true;
 	static constexpr bool requireGyroStillForSampling = true;
-	static constexpr float maxReferenceGyroNormRaw = 140.0f;
-	static constexpr float maxHoldStillGyroNormRaw = 110.0f;
+	// FSR/dps changes auto-apply without touching this file.
+	// Used during CAPTURE_REFERENCE stage.
+	static constexpr float maxReferenceCaptureGyroNormDps = 9.8f;
+	// Used during COLLECT_CALIBRATION_SAMPLES hold-still gate.
+	static constexpr float maxSampleCollectionHoldStillGyroNormDps = 7.7f;
 	static constexpr uint16_t gyroSampleStaleTimeoutMs = 250;
 	static constexpr float gyroEmaAlpha = 0.25f;
 	static constexpr uint16_t progressLogIntervalMs = 3000;
 	static constexpr uint16_t rejectLogIntervalMs = 3000;
 	static constexpr bool requireHoldStillForSampling = true;
 	static constexpr uint16_t minHoldStillDurationMs = 200;
-	static constexpr float minHoldStillDirectionDot = 0.9975641f;  // cos(4 deg)
-	static constexpr float maxHoldStillNormDeltaRaw = 80.0f;
+	static constexpr float minHoldStillDirectionDot
+		= std::cos(4 * PI / 180);  // 0.9975641f;  // cos(4 deg)
+	static constexpr float maxHoldStillAccelNormDeltaRaw = 80.0f;
 	static constexpr int32_t maxSpikeDeltaRaw = 300;
 	static constexpr int32_t maxRawAbsValue = 32000;
 	static constexpr float maxMagnitudeDeviationRatio = 0.12f;
@@ -422,12 +413,12 @@ private:
 		const SensorRawT sample[3],
 		std::array<float, 3>& outUnitDirection
 	) {
-		const float normRaw = accelNormRaw(sample);
-		if (!std::isfinite(normRaw) || normRaw <= 1e-6f) {
+		const float accelNormRawValue = accelNormRaw(sample);
+		if (!std::isfinite(accelNormRawValue) || accelNormRawValue <= 1e-6f) {
 			return false;
 		}
 
-		const float invNorm = 1.0f / normRaw;
+		const float invNorm = 1.0f / accelNormRawValue;
 		outUnitDirection = {
 			static_cast<float>(sample[0]) * invNorm,
 			static_cast<float>(sample[1]) * invNorm,
@@ -441,8 +432,8 @@ private:
 			return false;
 		}
 
-		const float normRaw = accelNormRaw(sample);
-		if (!std::isfinite(normRaw)) {
+		const float accelNormRawValue = accelNormRaw(sample);
+		if (!std::isfinite(accelNormRawValue)) {
 			return false;
 		}
 
@@ -454,7 +445,7 @@ private:
 			return false;
 		}
 
-		return hasFreshGyroSample() && gyroNormRawEma <= maxReferenceGyroNormRaw;
+		return hasFreshGyroSample() && gyroNormRawEma <= maxReferenceCaptureGyroNormRaw;
 	}
 
 	bool shouldAcceptCalibrationSample(const SensorRawT sample[3]) {
@@ -462,49 +453,49 @@ private:
 			return false;
 		}
 		auto& data = calibrationData.value();
-		const bool clearGroupOnReject = data.poseSampleCount < samplesPerPose;
 
 		if (sample[0] == 0 && sample[1] == 0 && sample[2] == 0) {
-			recordReject(data, RejectReason::ZERO_SAMPLE, clearGroupOnReject);
+			recordReject(data, RejectReason::ZERO_SAMPLE);
 			return false;
 		}
 
 		if (std::abs(static_cast<int32_t>(sample[0])) > maxRawAbsValue
 			|| std::abs(static_cast<int32_t>(sample[1])) > maxRawAbsValue
 			|| std::abs(static_cast<int32_t>(sample[2])) > maxRawAbsValue) {
-			recordReject(data, RejectReason::RAW_ABS_LIMIT, clearGroupOnReject);
+			recordReject(data, RejectReason::RAW_ABS_LIMIT);
 			return false;
 		}
 
-		const float normRaw = accelNormRaw(sample);
-		if (!std::isfinite(normRaw)) {
-			recordReject(data, RejectReason::NORM_NONFINITE, clearGroupOnReject);
+		const float accelNormRawValue = accelNormRaw(sample);
+		if (!std::isfinite(accelNormRawValue)) {
+			recordReject(data, RejectReason::NORM_NONFINITE);
 			return false;
 		}
 
 		std::array<float, 3> currentDirection{};
 		if (!toUnitDirection(sample, currentDirection)) {
-			recordReject(data, RejectReason::UNIT_DIRECTION, clearGroupOnReject);
+			recordReject(data, RejectReason::UNIT_DIRECTION);
 			return false;
 		}
 
 		const float allowedNormDelta = std::max(
-			data.referenceNormRaw * sampleNormToleranceRatio,
+			data.referenceAccelNormRaw * sampleNormToleranceRatio,
 			sampleNormToleranceRawMin
 		);
-		const float normDeltaAbs = std::abs(normRaw - data.referenceNormRaw);
-		data.lastNormRaw = normRaw;
-		data.lastNormDeltaAbsRaw = normDeltaAbs;
-		data.lastAllowedNormDeltaRaw = allowedNormDelta;
-		data.lastNormRejected = normDeltaAbs > allowedNormDelta;
-		if (data.lastNormRejected) {
-			recordReject(data, RejectReason::NORM_TOLERANCE, clearGroupOnReject);
+		const float normDeltaAbs
+			= std::abs(accelNormRawValue - data.referenceAccelNormRaw);
+		data.lastAccelNormRaw = accelNormRawValue;
+		data.lastAccelNormDeltaAbsRaw = normDeltaAbs;
+		data.lastAllowedAccelNormDeltaRaw = allowedNormDelta;
+		data.lastAccelNormRejected = normDeltaAbs > allowedNormDelta;
+		if (data.lastAccelNormRejected) {
+			recordReject(data, RejectReason::NORM_TOLERANCE);
 			return false;
 		}
 
 		if (requireHoldStillForSampling
-			&& !isHoldStillSatisfied(data, currentDirection, normRaw)) {
-			recordReject(data, RejectReason::HOLD_STILL, clearGroupOnReject);
+			&& !isHoldStillSatisfied(data, currentDirection, accelNormRawValue)) {
+			recordReject(data, RejectReason::HOLD_STILL);
 			return false;
 		}
 
@@ -517,7 +508,7 @@ private:
 					  + data.poseAnchorDirection.value()[1] * currentDirection[1]
 					  + data.poseAnchorDirection.value()[2] * currentDirection[2];
 		if (!std::isfinite(poseDot)) {
-			recordReject(data, RejectReason::POSE_DOT_NONFINITE, clearGroupOnReject);
+			recordReject(data, RejectReason::POSE_DOT_NONFINITE);
 			return false;
 		}
 		poseDot = std::clamp(poseDot, -1.0f, 1.0f);
@@ -557,7 +548,7 @@ private:
 		const int32_t dz
 			= std::abs(static_cast<int32_t>(sample[2]) - static_cast<int32_t>(prev[2]));
 		if (dx > maxSpikeDeltaRaw || dy > maxSpikeDeltaRaw || dz > maxSpikeDeltaRaw) {
-			recordReject(data, RejectReason::SPIKE_DELTA, clearGroupOnReject);
+			recordReject(data, RejectReason::SPIKE_DELTA);
 			return false;
 		}
 
@@ -712,8 +703,8 @@ private:
 	struct CalibrationData {
 		uint64_t startMillis = 0;
 		Stage stage = Stage::CAPTURE_REFERENCE;
-		float referenceNormRawAccum = 0.0f;
-		float referenceNormRaw = 0.0f;
+		float referenceAccelNormRawAccum = 0.0f;
+		float referenceAccelNormRaw = 0.0f;
 		size_t referenceSampleCount = 0;
 		size_t storedSampleCount = 0;
 		size_t writeIndex = 0;
@@ -722,21 +713,21 @@ private:
 		std::optional<std::array<float, 3>> poseAnchorDirection;
 		uint8_t currentPoseBucket = 0;
 		std::array<uint16_t, 6> poseGroupCounts{};
-		std::array<uint32_t, rejectReasonCount> rejectCounts{};
+		std::array<uint32_t, static_cast<size_t>(RejectReason::COUNT)> rejectCounts{};
 		uint32_t waitForNextPoseCount = 0;
 		uint32_t poseRestartCount = 0;
 		uint8_t poseSampleCount = 0;
 		bool poseSamplesCommitted = false;
 		std::optional<std::array<float, 3>> holdDirection;
-		float holdNormRaw = 0.0f;
+		float holdAccelNormRaw = 0.0f;
 		uint32_t holdStartMillis = 0;
 		uint32_t lastCoverageLogMillis = 0;
 		uint32_t lastProgressLogMillis = 0;
 		uint32_t lastRejectLogMillis = 0;
-		float lastNormRaw = 0.0f;
-		float lastNormDeltaAbsRaw = 0.0f;
-		float lastAllowedNormDeltaRaw = 0.0f;
-		bool lastNormRejected = false;
+		float lastAccelNormRaw = 0.0f;
+		float lastAccelNormDeltaAbsRaw = 0.0f;
+		float lastAllowedAccelNormDeltaRaw = 0.0f;
+		bool lastAccelNormRejected = false;
 		std::optional<std::array<SensorRawT, 3>> lastAcceptedSample;
 	};
 
@@ -792,15 +783,12 @@ private:
 		return "?";
 	}
 
-	void recordReject(
-		CalibrationData& data,
-		RejectReason reason,
-		bool clearGroupOnReject
-	) {
+	void recordReject(CalibrationData& data, RejectReason reason) {
 		const size_t idx = static_cast<size_t>(reason);
 		if (idx < data.rejectCounts.size()) {
 			data.rejectCounts[idx]++;
 		}
+		const bool clearGroupOnReject = data.poseSampleCount < samplesPerPose;
 		if (clearGroupOnReject) {
 			clearPoseGroup(data);
 		}
@@ -834,11 +822,11 @@ private:
 			static_cast<unsigned>(data.poseGroupCounts[5]),
 			gyroNormRawEma,
 			hasFreshGyroSample() ? "" : " (stale)",
-			data.lastNormRaw,
-			data.referenceNormRaw,
-			data.lastNormDeltaAbsRaw,
-			data.lastAllowedNormDeltaRaw,
-			data.lastNormRejected ? " (norm_reject)" : ""
+			data.lastAccelNormRaw,
+			data.referenceAccelNormRaw,
+			data.lastAccelNormDeltaAbsRaw,
+			data.lastAllowedAccelNormDeltaRaw,
+			data.lastAccelNormRejected ? " (norm_reject)" : ""
 		);
 
 		if (now - data.lastRejectLogMillis >= rejectLogIntervalMs) {
@@ -985,20 +973,21 @@ private:
 	bool isHoldStillSatisfied(
 		CalibrationData& data,
 		const std::array<float, 3>& currentDirection,
-		const float normRaw
+		const float accelNormRawValue
 	) {
 		const uint32_t now = millis();
 		if (requireGyroStillForSampling
-			&& (!hasFreshGyroSample() || gyroNormRawEma > maxHoldStillGyroNormRaw)) {
+			&& (!hasFreshGyroSample()
+				|| gyroNormRawEma > maxSampleCollectionHoldStillGyroNormRaw)) {
 			data.holdDirection = currentDirection;
-			data.holdNormRaw = normRaw;
+			data.holdAccelNormRaw = accelNormRawValue;
 			data.holdStartMillis = now;
 			return false;
 		}
 
 		if (!data.holdDirection.has_value()) {
 			data.holdDirection = currentDirection;
-			data.holdNormRaw = normRaw;
+			data.holdAccelNormRaw = accelNormRawValue;
 			data.holdStartMillis = now;
 			return false;
 		}
@@ -1009,17 +998,18 @@ private:
 					  + holdDirection[2] * currentDirection[2];
 		if (!std::isfinite(holdDot)) {
 			data.holdDirection = currentDirection;
-			data.holdNormRaw = normRaw;
+			data.holdAccelNormRaw = accelNormRawValue;
 			data.holdStartMillis = now;
 			return false;
 		}
 
 		holdDot = std::clamp(holdDot, -1.0f, 1.0f);
-		const float holdNormDelta = std::abs(normRaw - data.holdNormRaw);
+		const float holdAccelNormDelta
+			= std::abs(accelNormRawValue - data.holdAccelNormRaw);
 		if (holdDot < minHoldStillDirectionDot
-			|| holdNormDelta > maxHoldStillNormDeltaRaw) {
+			|| holdAccelNormDelta > maxHoldStillAccelNormDeltaRaw) {
 			data.holdDirection = currentDirection;
-			data.holdNormRaw = normRaw;
+			data.holdAccelNormRaw = accelNormRawValue;
 			data.holdStartMillis = now;
 			return false;
 		}
@@ -1035,12 +1025,35 @@ private:
 	std::optional<CalibrationData> calibrationData;
 	std::optional<CalibrationOutput> latestCalibration;
 	SlimeVR::Logging::Logger& logger;
+	float maxReferenceCaptureGyroNormRaw = 0.0f;
+	float maxSampleCollectionHoldStillGyroNormRaw = 0.0f;
 	bool restDetected = false;
 	bool hasRecentGyroSample = false;
 	uint32_t lastGyroSampleMillis = 0;
 	float gyroNormRawEma = 0.0f;
 	uint32_t sampleLedPulseEndMillis = 0;
 	bool sampleLedPulseActive = false;
+
+	// Converts gyro norm threshold (dps) into a raw threshold
+	// using current sensor scale.
+	static float convertGyroNormDpsToRawThreshold(
+		float gyroScaleRadPerSecPerRaw,
+		float gyroNormDpsThreshold
+	) {
+		if (!std::isfinite(gyroScaleRadPerSecPerRaw)
+			|| gyroScaleRadPerSecPerRaw <= 1e-9f) {
+			return 0.0f;
+		}
+		const float gyroDpsPerRaw = gyroScaleRadPerSecPerRaw * (180.0f / PI);
+		if (!std::isfinite(gyroDpsPerRaw) || gyroDpsPerRaw <= 1e-9f) {
+			return 0.0f;
+		}
+		const float rawThreshold = gyroNormDpsThreshold / gyroDpsPerRaw;
+		if (!std::isfinite(rawThreshold)) {
+			return 0.0f;
+		}
+		return rawThreshold > 0.0f ? rawThreshold : 0.0f;
+	}
 };
 
 }  // namespace SlimeVR::Sensors::RuntimeCalibration
