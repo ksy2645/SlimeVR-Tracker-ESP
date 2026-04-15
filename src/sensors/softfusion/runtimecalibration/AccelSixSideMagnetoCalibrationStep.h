@@ -218,9 +218,8 @@ private:
 	static constexpr uint8_t calibrationPreparationSeconds = 3;
 	static constexpr float legacyRestDetectionMinTimeSeconds = 3.0f;
 	static constexpr float legacyRestDetectionAccThreshold = 0.25f;
-	static constexpr float fallbackSamplePeriodSeconds = 0.01f;
 	static constexpr float minAccelSampleNormMs2 = 4.0f;
-	static constexpr float maxAccelSampleNormMs2 = 20.0f;
+	static constexpr float maxAccelSampleNormMs2 = 12.0f;
 	static constexpr float maxLegacyFitElementAbs = 20.0f;
 	static constexpr float minLegacyFitMeanDiagonalAbs = 1e-4f;
 	static constexpr float maxLegacyFitMeanDiagonalAbs = 10.0f;
@@ -231,20 +230,8 @@ private:
 		RestDetectionParams restParams;
 		restParams.restMinTime = legacyRestDetectionMinTimeSeconds;
 		restParams.restThAcc = legacyRestDetectionAccThreshold;
-		const float accelSamplePeriodSeconds
-			= (std::isfinite(sensorConfig.A_Ts) && sensorConfig.A_Ts > 1e-6f)
-				  ? sensorConfig.A_Ts
-				  : fallbackSamplePeriodSeconds;
-		const float gyroSamplePeriodSeconds
-			= (std::isfinite(sensorConfig.G_Ts) && sensorConfig.G_Ts > 1e-6f)
-				  ? sensorConfig.G_Ts
-				  : accelSamplePeriodSeconds;
-		data.accelSamplePeriodSeconds = accelSamplePeriodSeconds;
-		data.restDetection.emplace(
-			restParams,
-			gyroSamplePeriodSeconds,
-			accelSamplePeriodSeconds
-		);
+		data.accelSamplePeriodSeconds = sensorConfig.A_Ts;
+		data.restDetection.emplace(restParams, sensorConfig.G_Ts, sensorConfig.A_Ts);
 	}
 
 	void storeCalibration(const float magnetoFit[4][3]) {
@@ -380,7 +367,7 @@ private:
 		uint16_t positionsRecorded = 0;
 		uint16_t currentPositionSampleCount = 0;
 		bool waitForMotion = true;
-		float accelSamplePeriodSeconds = fallbackSamplePeriodSeconds;
+		float accelSamplePeriodSeconds = 0.0f;
 		size_t magnetoSampleCount = 0;
 		size_t discardedSampleCount = 0;
 		uint32_t lastProgressLogMillis = 0;

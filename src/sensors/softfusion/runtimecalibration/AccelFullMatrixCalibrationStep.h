@@ -367,19 +367,27 @@ private:
 		COUNT,
 	};
 
-	static constexpr size_t referenceSampleCount = 120;
-	static constexpr size_t calibrationWindowSampleCount = 240;
+	// main options.
 	static constexpr size_t minCalibrationSampleCount = 80;
 	static constexpr uint16_t maxCalibrationTimeSeconds = 420;
+	static constexpr uint8_t minPoseGroupsPerDirection = 3;
+	// First acceleration norm measurement.
+	static constexpr size_t referenceSampleCount = 120;
+	static constexpr size_t calibrationWindowSampleCount = 240;
 	static constexpr float minReferenceAccelNormRaw = 100.0f;
+	// Cluster sampling options.
 	static constexpr uint8_t samplesPerPose = 9;
 	static constexpr float minSamePoseDirectionDot
 		= std::cos(6 * PI / 180);  // 0.9945219f;  // cos(6 deg)
 	static constexpr float maxNextPoseDirectionDot
 		= std::cos(20 * PI / 180);  // 0.9396926f;  // cos(20 deg)
 	// ~313 raw tolerance when referenceAccelNormRaw is around 8245
+	static constexpr int32_t maxSpikeDeltaRaw = 300;
+	static constexpr int32_t maxRawAbsValue = 32000;
+	// misc
 	static constexpr float sampleNormToleranceRatio = 0.038f;
 	static constexpr float sampleNormToleranceRawMin = 60.0f;
+
 	static constexpr bool allowGyroStillReferenceWithoutRest = true;
 	static constexpr bool requireGyroStillForSampling = true;
 	// FSR/dps changes auto-apply without touching this file.
@@ -389,18 +397,15 @@ private:
 	static constexpr float maxSampleCollectionHoldStillGyroNormDps = 7.7f;
 	static constexpr uint16_t gyroSampleStaleTimeoutMs = 250;
 	static constexpr float gyroEmaAlpha = 0.25f;
-	static constexpr uint16_t progressLogIntervalMs = 3000;
-	static constexpr uint16_t rejectLogIntervalMs = 3000;
 	static constexpr bool requireHoldStillForSampling = true;
 	static constexpr uint16_t minHoldStillDurationMs = 200;
 	static constexpr float minHoldStillDirectionDot
 		= std::cos(4 * PI / 180);  // 0.9975641f;  // cos(4 deg)
 	static constexpr float maxHoldStillAccelNormDeltaRaw = 80.0f;
-	static constexpr int32_t maxSpikeDeltaRaw = 300;
-	static constexpr int32_t maxRawAbsValue = 32000;
 	static constexpr float maxMagnitudeDeviationRatio = 0.12f;
-	static constexpr uint8_t minPoseGroupsPerDirection = 3;
 	static constexpr uint16_t sampleLedPulseWidthMs = 30;
+	static constexpr uint16_t progressLogIntervalMs = 3000;
+	static constexpr uint16_t rejectLogIntervalMs = 3000;
 
 	static float accelNormRaw(const SensorRawT sample[3]) {
 		const float x = static_cast<float>(sample[0]);
